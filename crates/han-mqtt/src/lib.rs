@@ -6,7 +6,7 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use han_core::{
     FIELD_COUNT, FIELDS, Telemetry,
-    discovery::{self, HA_STATUS_TOPIC, Topics},
+    discovery::{self, DIAGNOSTIC_INTERVAL_MS, Diagnostic, HA_STATUS_TOPIC, Topics},
 };
 use rust_mqtt::{
     Bytes,
@@ -57,7 +57,9 @@ struct Publishing {
     discovered: u32,
     sent: [u64; FIELD_COUNT],
     field_online: [Option<bool>; FIELD_COUNT],
-    device_online: Option<bool>,
+    device_online: bool,
+    diagnostics_discovered: bool,
+    diagnostics_sent_ms: Option<u64>,
     refresh: bool,
     ping_sent: Option<Instant>,
 }
@@ -68,7 +70,9 @@ impl Publishing {
             discovered: 0,
             sent: [0; FIELD_COUNT],
             field_online: [None; FIELD_COUNT],
-            device_online: None,
+            device_online: false,
+            diagnostics_discovered: false,
+            diagnostics_sent_ms: None,
             refresh: true,
             ping_sent: None,
         }
@@ -271,10 +275,49 @@ async fn synchronize<N: Transport, A: Application>(
         publishing.discovered = 0;
         publishing.sent = [0; FIELD_COUNT];
         publishing.field_online = [None; FIELD_COUNT];
-        publishing.device_online = None;
+        publishing.device_online = false;
+        publishing.diagnostics_discovered = false;
+        publishing.diagnostics_sent_ms = None;
     }
     let snapshot = application.snapshot();
     let mut buffer = [0; discovery::DISCOVERY_CAPACITY];
+    let now_ms = application.now_ms();
+    if publishing
+        .diagnostics_sent_ms
+        .is_none_or(|last| now_ms.saturating_sub(last) >= DIAGNOSTIC_INTERVAL_MS)
+    {
+        for (diagnostic, value) in [
+            (Diagnostic::UartErrors, Some(snapshot.uart_errors)),
+            (
+                Diagnostic::TelegramAge,
+                snapshot.seconds_since_last_valid(now_ms),
+            ),
+        ] {
+            let topics = Topics::for_diagnostic(id, diagnostic).map_err(|_| Error::Encoding)?;
+            if !publishing.diagnostics_discovered {
+                let len = discovery::encode_diagnostic(
+                    id,
+                    config.device_name,
+                    config.version,
+                    diagnostic,
+                    &topics,
+                    availability,
+                    &mut buffer,
+                )
+                .map_err(|_| Error::Encoding)?;
+                publish(client, &topics.discovery, &buffer[..len], true, publishing).await?;
+            }
+            let mut payload = heapless::String::<20>::new();
+            match value {
+                Some(value) => write!(payload, "{value}").map_err(|_| Error::Encoding)?,
+                // Home Assistant's numeric MQTT sensors interpret None as unknown.
+                None => payload.push_str("None").map_err(|_| Error::Encoding)?,
+            }
+            publish(client, &topics.state, payload.as_bytes(), false, publishing).await?;
+        }
+        publishing.diagnostics_discovered = true;
+        publishing.diagnostics_sent_ms = Some(now_ms);
+    }
     for (i, field) in FIELDS.iter().enumerate() {
         let topics = Topics::new(id, field).map_err(|_| Error::Encoding)?;
         let Some(reading) = snapshot.readings[i] else {
@@ -321,17 +364,11 @@ async fn synchronize<N: Transport, A: Application>(
             publishing.field_online[i] = Some(fresh);
         }
     }
-    let online = snapshot.online(application.now_ms());
-    if publishing.device_online != Some(online) {
-        publish(
-            client,
-            availability,
-            if online { b"online" } else { b"offline" },
-            true,
-            publishing,
-        )
-        .await?;
-        publishing.device_online = Some(online);
+    // Shared availability reflects MQTT connectivity. Each meter reading has its
+    // own freshness topic, so diagnostics stay visible when the P1 input stalls.
+    if !publishing.device_online {
+        publish(client, availability, b"online", true, publishing).await?;
+        publishing.device_online = true;
     }
     Ok(())
 }

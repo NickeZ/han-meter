@@ -33,6 +33,24 @@ fn recovery_accepts_counter_reset_without_inventing_zeroes() {
 }
 
 #[test]
+fn telegram_age_is_unknown_until_valid_data_and_survives_errors_and_staleness() {
+    let mut telemetry = Telemetry::new();
+    assert_eq!(telemetry.seconds_since_last_valid(100_000), None);
+    let mut snapshot = Snapshot::default();
+    snapshot.readings[0] = Some(Value::Number(Decimal::parse("1.234").unwrap()));
+    telemetry.update(snapshot, 1_001);
+    assert_eq!(telemetry.seconds_since_last_valid(1_000), Some(0));
+    assert_eq!(telemetry.seconds_since_last_valid(2_000), Some(0));
+    assert_eq!(telemetry.seconds_since_last_valid(2_001), Some(1));
+    telemetry.uart_errors += 1;
+    telemetry.invalid_frames += 1;
+    assert!(!telemetry.online(61_001));
+    assert_eq!(telemetry.seconds_since_last_valid(61_001), Some(60));
+    telemetry.update(snapshot, 90_000);
+    assert_eq!(telemetry.seconds_since_last_valid(90_000), Some(0));
+}
+
+#[test]
 fn reconnect_backoff_is_bounded_and_resettable() {
     let mut backoff = Backoff::new();
     let delays: Vec<_> = (0..9).map(|_| backoff.next_seconds()).collect();
@@ -70,6 +88,7 @@ fn discovery_groups_stable_entities_and_escapes_names() {
             topics.availability.as_str()
         );
         assert_eq!(json["expire_after"], 60);
+        assert!(json.get("entity_category").is_none());
         if field.key == "energy_import" {
             assert_eq!(json["device_class"], "energy");
             assert_eq!(json["state_class"], "total_increasing");
@@ -86,6 +105,60 @@ fn discovery_groups_stable_entities_and_escapes_names() {
         assert!(
             discovery::encode(&id, "Meter", "0.1.0", &field, &topics, &status, &mut [0; 8])
                 .is_err()
+        );
+    }
+}
+
+#[test]
+fn diagnostics_share_the_device_but_do_not_depend_on_meter_freshness() {
+    use discovery::Diagnostic;
+    let id = discovery::device_id([0x12, 0x34, 0xab, 0xcd, 0, 0xff]);
+    let status = discovery::availability_topic(&id).unwrap();
+    let mut buffer = [0; discovery::DISCOVERY_CAPACITY];
+    for diagnostic in [Diagnostic::UartErrors, Diagnostic::TelegramAge] {
+        let topics = discovery::Topics::for_diagnostic(&id, diagnostic).unwrap();
+        let len = discovery::encode_diagnostic(
+            &id,
+            "Meter \"garage\"\nα",
+            "0.1.0",
+            diagnostic,
+            &topics,
+            &status,
+            &mut buffer,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&buffer[..len]).unwrap();
+        assert_eq!(json["entity_category"], "diagnostic");
+        assert_eq!(json["device"]["identifiers"][0], id.as_str());
+        assert_eq!(json["device"]["name"], "Meter \"garage\"\nα");
+        assert_eq!(json["state_topic"], topics.state.as_str());
+        assert_eq!(json["unique_id"], topics.unique_id.as_str());
+        assert_eq!(json["availability"].as_array().unwrap().len(), 1);
+        assert_eq!(json["availability"][0]["topic"], status.as_str());
+        assert_eq!(json["expire_after"], 180);
+        match diagnostic {
+            Diagnostic::UartErrors => {
+                assert_eq!(json["state_class"], "total_increasing");
+                assert!(json.get("unit_of_measurement").is_none());
+                assert!(json.get("device_class").is_none());
+            }
+            Diagnostic::TelegramAge => {
+                assert_eq!(json["state_class"], "measurement");
+                assert_eq!(json["unit_of_measurement"], "s");
+                assert_eq!(json["device_class"], "duration");
+            }
+        }
+        assert!(
+            discovery::encode_diagnostic(
+                &id,
+                "Meter",
+                "0.1.0",
+                diagnostic,
+                &topics,
+                &status,
+                &mut [0; 8],
+            )
+            .is_err()
         );
     }
 }

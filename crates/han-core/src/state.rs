@@ -61,6 +61,12 @@ impl Telemetry {
             .is_some_and(|last| now_ms.saturating_sub(last) < STALE_MS)
     }
 
+    /// Unknown until the first valid telegram; continues increasing after data expires.
+    pub fn seconds_since_last_valid(&self, now_ms: u64) -> Option<u64> {
+        self.last_valid_ms
+            .map(|last| now_ms.saturating_sub(last) / 1000)
+    }
+
     pub fn seen_mask(&self) -> u32 {
         self.readings
             .iter()

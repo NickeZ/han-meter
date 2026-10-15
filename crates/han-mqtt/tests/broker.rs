@@ -1,7 +1,7 @@
 //! Exercises the production MQTT session against an isolated Mosquitto broker.
 //! The observer is an independent, minimal MQTT 3.1.1 wire client.
 use embedded_io_adapters::tokio_1::FromTokio;
-use han_core::{Decimal, Snapshot, Telemetry, Value, discovery};
+use han_core::{Decimal, Snapshot, Telemetry, Value, discovery, discovery::Diagnostic};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -180,6 +180,8 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
             let availability = discovery::availability_topic(&id).unwrap();
             let energy = discovery::Topics::new(&id, &han_core::FIELDS[0]).unwrap();
             let power = discovery::Topics::new(&id, &han_core::FIELDS[4]).unwrap();
+            let uart = discovery::Topics::for_diagnostic(&id, Diagnostic::UartErrors).unwrap();
+            let age = discovery::Topics::for_diagnostic(&id, Diagnostic::TelegramAge).unwrap();
             let mut observer = Observer::connect(
                 &address,
                 "observer",
@@ -187,12 +189,28 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
             )
             .await;
             let app = App::new();
-            app.update(Some("12345678.123"), "1.234");
             let device = launch(&address, &id, app.clone()).await;
 
+            // Diagnostics are discovered before any meter data, including an unknown age.
             let messages = observer
                 .until(|m| contains(m, &availability, "online"))
                 .await;
+            assert!(contains(&messages, &uart.state, "0"));
+            assert!(contains(&messages, &age.state, "None"));
+            for topics in [&uart, &age] {
+                let message = messages
+                    .iter()
+                    .find(|m| m.topic == topics.discovery.as_str())
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_str(&message.payload).unwrap();
+                assert_eq!(json["entity_category"], "diagnostic");
+                assert_eq!(json["device"]["identifiers"][0], id.as_str());
+                assert_eq!(json["availability"].as_array().unwrap().len(), 1);
+                assert_eq!(json["availability"][0]["topic"], availability.as_str());
+                assert_eq!(json["expire_after"], 180);
+            }
+            app.update(Some("12345678.123"), "1.234");
+            let messages = observer.until(|m| contains(m, &power.state, "1.234")).await;
             assert!(contains(&messages, &energy.state, "12345678.123"));
             assert!(contains(&messages, &power.state, "1.234"));
             let energy_config = messages
@@ -210,16 +228,31 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
                 &address,
                 "replay",
                 &[
+                    &uart.state,
+                    &age.state,
                     &availability,
                     &energy.discovery,
                     &energy.availability,
                     &energy.state,
+                    &uart.discovery,
+                    &age.discovery,
                 ],
             )
             .await;
-            let replayed = replay.until(|m| m.len() == 3).await;
+            let replayed = replay.until(|m| m.len() == 5).await;
             assert!(replayed.iter().all(|m| m.retained));
-            assert!(replayed.iter().all(|m| m.topic != energy.state.as_str()));
+            assert!(replayed.iter().all(|m| !m.topic.ends_with("/state")));
+
+            // Routine telegrams must not publish diagnostics more often than once a minute.
+            app.now.set(159_999);
+            app.telemetry.borrow_mut().uart_errors = 7;
+            app.update(None, "2.000");
+            let messages = observer.until(|m| contains(m, &power.state, "2.000")).await;
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| m.topic == uart.state.as_str() || m.topic == age.state.as_str())
+            );
 
             // Time advances in the application domain; only power is refreshed.
             app.now.set(160_001);
@@ -231,6 +264,8 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
                 })
                 .await;
             assert!(!messages.iter().any(|m| m.topic == energy.state.as_str()));
+            assert!(contains(&messages, &uart.state, "7"));
+            assert!(contains(&messages, &age.state, "0"));
 
             observer.publish("homeassistant/status", "online").await;
             let messages = observer
@@ -244,6 +279,10 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
             assert!(contains(&messages, &energy.availability, "offline"));
             assert!(contains(&messages, &power.state, "2.345"));
             assert!(!messages.iter().any(|m| m.topic == energy.state.as_str()));
+            assert!(contains(&messages, &uart.state, "7"));
+            assert!(contains(&messages, &age.state, "0"));
+            assert!(messages.iter().any(|m| m.topic == uart.discovery.as_str()));
+            assert!(messages.iter().any(|m| m.topic == age.discovery.as_str()));
 
             // Dropping the production session must result in the broker's offline Will.
             device.abort();
@@ -257,6 +296,8 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
                 .until(|m| contains(m, &availability, "online"))
                 .await;
             assert!(contains(&messages, &power.state, "2.345"));
+            assert!(contains(&messages, &uart.state, "7"));
+            assert!(contains(&messages, &age.state, "0"));
             assert!(!messages.iter().any(|m| m.topic == energy.state.as_str()));
             assert!(
                 messages
@@ -264,13 +305,23 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
                     .any(|m| m.topic == energy.discovery.as_str())
             );
 
-            // All telemetry can expire while the MQTT connection remains healthy.
+            // Even without change notifications, the timer publishes diagnostics for a stalled meter.
             app.now.set(220_002);
-            app.notify.notify_one();
+            app.telemetry.borrow_mut().uart_errors = u64::MAX;
             let messages = observer
-                .until(|m| contains(m, &availability, "offline"))
+                .until(|m| {
+                    contains(m, &power.availability, "offline")
+                        && contains(m, &uart.state, "18446744073709551615")
+                        && contains(m, &age.state, "60")
+                })
                 .await;
             assert!(contains(&messages, &power.availability, "offline"));
+            assert!(!contains(&messages, &availability, "offline"));
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| m.topic == energy.state.as_str() || m.topic == power.state.as_str())
+            );
             assert!(!device.is_finished());
             device.abort();
             let _ = device.await;
@@ -287,6 +338,8 @@ async fn discovery_freshness_restart_last_will_and_authentication() {
                 .await;
             assert!(contains(&messages, &energy.availability, "offline"));
             assert!(contains(&messages, &power.state, "3.456"));
+            assert!(contains(&messages, &uart.state, "0"));
+            assert!(contains(&messages, &age.state, "0"));
             device.abort();
             let _ = device.await;
 

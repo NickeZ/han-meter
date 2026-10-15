@@ -6,6 +6,22 @@ use crate::{Field, STALE_MS};
 
 pub const DISCOVERY_CAPACITY: usize = 1536;
 pub const HA_STATUS_TOPIC: &str = "homeassistant/status";
+pub const DIAGNOSTIC_INTERVAL_MS: u64 = 60_000;
+
+#[derive(Clone, Copy)]
+pub enum Diagnostic {
+    UartErrors,
+    TelegramAge,
+}
+
+impl Diagnostic {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::UartErrors => "uart_errors",
+            Self::TelegramAge => "seconds_since_last_valid_telegram",
+        }
+    }
+}
 
 pub fn device_id(mac: [u8; 6]) -> String<24> {
     let mut id = String::new();
@@ -31,24 +47,28 @@ pub struct Topics {
 
 impl Topics {
     pub fn new(id: &str, field: &Field) -> Result<Self, core::fmt::Error> {
+        Self::for_key(id, field.key)
+    }
+
+    pub fn for_diagnostic(id: &str, diagnostic: Diagnostic) -> Result<Self, core::fmt::Error> {
+        Self::for_key(id, diagnostic.key())
+    }
+
+    fn for_key(id: &str, key: &str) -> Result<Self, core::fmt::Error> {
         let mut result = Self {
             discovery: String::new(),
             state: String::new(),
             availability: String::new(),
             unique_id: String::new(),
         };
-        write!(result.unique_id, "{id}_{}", field.key)?;
+        write!(result.unique_id, "{id}_{key}")?;
         write!(
             result.discovery,
             "homeassistant/sensor/{}/config",
             result.unique_id
         )?;
-        write!(result.state, "han_meter/{id}/{}/state", field.key)?;
-        write!(
-            result.availability,
-            "han_meter/{id}/{}/availability",
-            field.key
-        )?;
+        write!(result.state, "han_meter/{id}/{key}/state")?;
+        write!(result.availability, "han_meter/{id}/{key}/availability")?;
         Ok(result)
     }
 }
@@ -77,9 +97,11 @@ struct Sensor<'a> {
     name: &'a str,
     unique_id: &'a str,
     state_topic: &'a str,
-    availability: [Availability<'a>; 2],
+    availability: &'a [Availability<'a>],
     availability_mode: &'a str,
     expire_after: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entity_category: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unit_of_measurement: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,7 +126,7 @@ pub fn encode(
             name: field.name,
             unique_id: &topics.unique_id,
             state_topic: &topics.state,
-            availability: [
+            availability: &[
                 Availability {
                     topic: availability,
                 },
@@ -114,9 +136,58 @@ pub fn encode(
             ],
             availability_mode: "all",
             expire_after: STALE_MS / 1000,
+            entity_category: None,
             unit_of_measurement: field.unit,
             device_class: field.device_class,
             state_class: field.state_class,
+            device: Device {
+                identifiers: [id],
+                name,
+                model: "ESP32-C3 Swedish HAN/P1",
+                sw_version: version,
+            },
+            origin: Origin {
+                name: "han-meter",
+                sw_version: version,
+            },
+        },
+        output,
+    )
+}
+
+pub fn encode_diagnostic(
+    id: &str,
+    name: &str,
+    version: &str,
+    diagnostic: Diagnostic,
+    topics: &Topics,
+    availability: &str,
+    output: &mut [u8],
+) -> Result<usize, serde_json_core::ser::Error> {
+    let (sensor_name, unit, device_class, state_class) = match diagnostic {
+        Diagnostic::UartErrors => ("UART error count", None, None, "total_increasing"),
+        Diagnostic::TelegramAge => (
+            "Seconds since last valid telegram",
+            Some("s"),
+            Some("duration"),
+            "measurement",
+        ),
+    };
+    serde_json_core::to_slice(
+        &Sensor {
+            name: sensor_name,
+            unique_id: &topics.unique_id,
+            state_topic: &topics.state,
+            // Diagnostics remain usable when the meter is silent or data is invalid.
+            availability: &[Availability {
+                topic: availability,
+            }],
+            availability_mode: "all",
+            expire_after: 3 * DIAGNOSTIC_INTERVAL_MS / 1000,
+            entity_category: Some("diagnostic"),
+            unit_of_measurement: unit,
+            device_class,
+            state_class: Some(state_class),
             device: Device {
                 identifiers: [id],
                 name,

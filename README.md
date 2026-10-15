@@ -51,7 +51,7 @@ This produces a build for verification, with placeholder settings. Build again u
 
 ## Home Assistant
 
-Enable the MQTT integration and discovery in Home Assistant, using the same MQTT 5 broker. Once a valid telegram arrives, the firmware discovers its supported readings under one device. The device identifier is `han_` followed by the station MAC address as twelve lowercase hexadecimal digits. Renaming the device does not change entity identifiers.
+Enable the MQTT integration and discovery in Home Assistant, using the same MQTT 5 broker. The firmware discovers two diagnostic sensors on connection and adds supported meter readings once a valid telegram arrives, all under one device. The device identifier is `han_` followed by the station MAC address as twelve lowercase hexadecimal digits. Renaming the device does not change entity identifiers.
 
 The 26 numeric fields cover:
 
@@ -68,17 +68,26 @@ An additional sensor exposes the meter timestamp as its original `YYMMDDhhmmssW/
 
 Energy counters preserve decimal precision and use `total_increasing`; instantaneous readings use `measurement`. Select the **Energy import** and, where relevant, **Energy export** sensors in Home Assistant's Energy dashboard settings. The firmware reports the meter's absolute counters, including legitimate counter resets, without calculating energy from power or inserting zeroes.
 
+Two sensors appear in the device's **Diagnostics** section:
+
+- **UART error count**: UART receive errors since boot, resetting to zero after a restart. Telegram parse/CRC failures are counted separately in the USB log.
+- **Seconds since last valid telegram**: elapsed whole seconds since the most recent accepted telegram. It is unknown until the first valid telegram; invalid input does not reset the age.
+
+Diagnostics publish every 60 seconds, immediately after MQTT connection, and when Home Assistant announces startup. They remain available while MQTT is connected, including when the meter is silent or its data has expired. Diagnostic discovery is retained; diagnostic values are not retained and expire in Home Assistant after 180 seconds without an update.
+
 | Topic | Purpose | Retained / QoS |
 | --- | --- | --- |
 | `homeassistant/sensor/<id>_<reading>/config` | Sensor discovery | Yes / 1 |
 | `han_meter/<id>/<reading>/state` | Decimal value or raw timestamp | No / 0 |
-| `han_meter/<id>/availability` | Device `online` / `offline` | Yes / 1 |
+| `han_meter/<id>/uart_errors/state` | UART error count since boot | No / 0 |
+| `han_meter/<id>/seconds_since_last_valid_telegram/state` | Whole seconds, or `None` before the first valid telegram | No / 0 |
+| `han_meter/<id>/availability` | MQTT connection `online` / `offline` | Yes / 1 |
 | `han_meter/<id>/<reading>/availability` | Individual reading freshness | Yes / 1 |
 | `homeassistant/status` | Subscribed Home Assistant startup notification | Subscription QoS 0 |
 
 Every accepted telegram updates the latest values. Network outages coalesce updates in RAM; no history is written to flash or replayed later. Wi-Fi and MQTT reconnect with exponential delays from 1 to 60 seconds. Discovery and fresh values are replayed after reconnects and Home Assistant startup.
 
-Each reading becomes unavailable after 60 seconds without an update, even when other fields continue arriving. Replayed values retain their original freshness deadline. A retained MQTT Last Will marks the device offline after connection loss. On boot, retained availability is cleared before current data is restored. Discovery messages remain retained across restarts.
+Each meter reading becomes unavailable after 60 seconds without an update, even when other fields continue arriving. Replayed values retain their original freshness deadline. A retained MQTT Last Will marks the device and its diagnostics offline after connection loss. On boot, retained availability is cleared before current data is restored. Discovery messages remain retained across restarts.
 
 ## Development and tests
 
@@ -97,7 +106,7 @@ cargo fmt --all -- --check
 bash scripts/test-mqtt.sh
 ```
 
-The broker test requires Docker. It starts an isolated Mosquitto container with test credentials on an ephemeral localhost port and removes the container afterward. It exercises the production MQTT session with an independent MQTT observer: discovery, retention, exact values, stale fields, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, and rejected authentication. Unit tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, and counter resets.
+The broker test requires Docker. It starts an isolated Mosquitto container with test credentials on an ephemeral localhost port and removes the container afterward. It exercises the production MQTT session with an independent MQTT observer: discovery, retention, exact values, stale fields, periodic diagnostics with and without meter data, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, and rejected authentication. Unit tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, counter resets, and diagnostic metadata/telegram age.
 
 ## Hardware acceptance
 
@@ -105,7 +114,7 @@ The software tests do not replace these checks on the actual meter and board:
 
 1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, 115200 8N1, and the DHCP hostname; verify Wi-Fi and MQTT connection logs and check the router's client list for the hostname.
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.
-3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility.
+3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility. Verify its two diagnostic sensors update every minute and the telegram age increases when P1 input stops while MQTT stays connected.
 4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes.
 5. Run for 24 hours using P1 power, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability.
 
