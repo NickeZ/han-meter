@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod network;
 mod settings;
+mod status_led;
 mod config {
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
 }
@@ -48,6 +49,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, interrupts.software_interrupt0);
+    spawner.spawn(status_led::run(peripherals.RMT, peripherals.GPIO10).unwrap());
     let (mqtt_settings, settings_store) =
         settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
 

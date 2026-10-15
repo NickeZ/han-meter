@@ -1,9 +1,11 @@
 # HAN meter
 
-Bare-metal Rust firmware for an ESP32-C3 that reads Swedish ASCII HAN/P1 telegrams and reports them to Home Assistant using MQTT discovery.
+Bare-metal Rust firmware for the **Waveshare ESP32-C3-Zero** that reads Swedish ASCII HAN/P1 telegrams and reports them to Home Assistant using MQTT discovery.
 
 ## Hardware and protocol
 
+- The board is a [Waveshare ESP32-C3-Zero](https://docs.waveshare.com/ESP32-C3-Zero), based on the ESP32-C3FH4 with 4 MB flash.
+- Its onboard WS2812 RGB LED connects to **GPIO10** and uses [RGB byte order](https://docs.waveshare.com/ESP32-C3-Zero/FAQ). It blinks dim green (500 ms on, 500 ms off) while Wi-Fi is disconnected, turns off when the device joins the access point, and resumes blinking after a disconnect. An asynchronous RMT task drives the LED independently of meter reception and MQTT.
 - P1 data connects directly to **GPIO0**, with an **external 3.3 V pull-up**. The firmware enables input inversion in the GPIO matrix and uses UART1 at **115200 baud, 8N1**.
 - The P1 data-request pin is already held high by the hardware. No GPIO output or UART TX is configured for the meter.
 - The board is powered from P1 through its regulator. Native USB Serial/JTAG is used for flashing and diagnostic logs.
@@ -143,10 +145,10 @@ The broker tests require Docker. They start two isolated Mosquitto containers wi
 
 The software tests do not replace these checks on the actual meter and board:
 
-1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, 115200 8N1, and the DHCP hostname; verify Wi-Fi and MQTT connection logs and check the router's client list for the hostname.
+1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, 115200 8N1, and the DHCP hostname; verify Wi-Fi and MQTT connection logs and check the router's client list for the hostname. Verify the onboard LED blinks green until Wi-Fi connects, then turns off.
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.
 3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility. Verify its two diagnostic sensors update every minute and the telegram age increases when P1 input stops while MQTT stays connected.
-4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes.
+4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes. Check that the green blink resumes during Wi-Fi outages and stops after reconnection, including when MQTT is unavailable.
 5. Run for 24 hours using P1 power, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability.
 6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
 7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.

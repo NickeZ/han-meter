@@ -1,5 +1,5 @@
 use crate::settings::SettingsControl;
-use crate::{UPDATED, config, telemetry};
+use crate::{UPDATED, config, status_led, telemetry};
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
@@ -36,9 +36,11 @@ pub(crate) async fn wifi(mut controller: WifiController<'static>) {
             let _ = controller.set_power_saving(PowerSaveMode::Minimum);
             match with_timeout(Duration::from_secs(30), controller.connect_async()).await {
                 Ok(Ok(_)) => {
+                    status_led::set_wifi_connected(true);
                     println!("Wi-Fi connected");
                     let connected_at = Instant::now();
                     let _ = controller.wait_for_disconnect_async().await;
+                    status_led::set_wifi_connected(false);
                     if connected_at.elapsed() >= Duration::from_secs(60) {
                         retry.reset();
                     }
