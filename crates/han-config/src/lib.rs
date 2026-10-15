@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod diagnostics;
 pub mod storage;
 #[cfg(feature = "web")]
 pub mod web;

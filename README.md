@@ -8,7 +8,7 @@ Bare-metal Rust firmware for the **Waveshare ESP32-C3-Zero** that reads Swedish 
 - Its onboard WS2812 RGB LED connects to **GPIO10** and uses [RGB byte order](https://docs.waveshare.com/ESP32-C3-Zero/FAQ). It blinks dim green (500 ms on, 500 ms off) while Wi-Fi is disconnected, turns off when the device joins the access point, and resumes blinking after a disconnect. An asynchronous RMT task drives the LED independently of meter reception and MQTT.
 - P1 data connects directly to **GPIO0**, with an **external 3.3 V pull-up**. The firmware enables input inversion in the GPIO matrix and uses UART1 at **115200 baud, 8N1**.
 - The P1 data-request pin is already held high by the hardware. No GPIO output or UART TX is configured for the meter.
-- The board is powered from P1 through its regulator. Native USB Serial/JTAG is used for flashing and diagnostic logs.
+- The board is powered from P1 through its regulator. Native USB Serial/JTAG is used for flashing and diagnostic logs; reception and connection diagnostics are also available from the device's web page while connected to P1.
 - The meter's customer port must be activated by the network operator. This firmware expects the Swedish ASCII profile, with `/` framing, OBIS records, and `!` followed by four hexadecimal CRC digits and CRLF. Binary HAN/DLMS telegrams are not supported.
 
 The application runs at 80 MHz and enables minimum Wi-Fi modem sleep. UART reception stays active during network failures. The application uses `no_std`, `esp-hal`, Embassy/`esp-rtos`, `esp-radio`, and `embassy-net`; the ESP-IDF bootloader format is used without the ESP-IDF application runtime. Wi-Fi and MQTT use a fixed 96 KiB allocator arena. Telegram parsing does not allocate.
@@ -79,9 +79,22 @@ The browser uses these local HTTP endpoints:
 | --- | --- |
 | `GET /` | Embedded settings page; no external assets or internet connection needed |
 | `GET /api/mqtt` | `host`, `port`, `username`, `password_set`, `status`, `last_error`, and `storage_available`; never the password |
+| `GET /api/diagnostics?after=<sequence>` | Live reception counters and up to 4 diagnostic events after the supplied sequence (default 0); no credentials |
 | `POST /api/mqtt` | JSON containing `host`, `port`, `username`, and optional `password`; omitted, null, or empty password preserves the current one |
 
 API writes require `Content-Type: application/json`, `Content-Length`, and `X-Han-Settings: 1`. Bodies are limited to 4096 bytes, and unknown fields are rejected. A successful response reports `saved`, `changed`, and `message`; saved settings do not imply a successful broker connection. Settings responses are not cached, and the server bounds requests with five-second read/write timeouts.
+
+## Debug without USB
+
+After flashing, connect the device to HAN/P1 and open `http://<device-ip>/`. Select **View diagnostic log**. Diagnostics refresh every two seconds and remain usable when MQTT is disconnected or settings storage is unavailable. **Pause updates** stops browser polling of diagnostics while the device continues recording. **Download log** saves the current counters and the events collected by this browser as `han-meter-debug.txt`.
+
+The page shows uptime, accepted/rejected telegram counts, UART errors split into overflow/framing/glitch/parity/other, the age of the last valid telegram, and the latest and longest intervals between valid telegrams. An unknown interval means fewer than two valid telegrams have arrived. UART errors are receive-error events, not a count of lost telegrams: one telegram can cause multiple errors.
+
+Events include startup/storage messages, Wi-Fi and MQTT connection/retry events, UART error types, telegram rejection reasons, and valid-telegram gaps of at least 1.5 seconds. Gap events measure arrival timing, so meters with a slower normal cadence also produce them. Existing application USB messages are mirrored; UART and parser errors are recorded only in RAM to avoid synchronous USB writes in the receive task. This is an application log, not a capture of bootloader output or panic backtraces. No credentials, HTTP request bodies, or raw meter telegrams are logged.
+
+The device retains its latest 64 events with messages limited to 160 bytes, overwriting the oldest entries. It does not write logs to flash; rebooting clears the log and counters. UART messages are limited to one per second per error type and parser rejection messages to one per second, while all error counters continue increasing. The browser keeps up to 256 lines and reports when older device entries were overwritten or a restart is detected. Download before closing the page or restarting if you need to retain the evidence.
+
+The diagnostic API uses the same local Host checks as the settings API, returns `Cache-Control: no-store`, and includes a `boot_id`, millisecond timestamps, counters, and a `log` object. Use `log.next_after` as the next cursor; `log.more` indicates another page and `log.lost` indicates overwritten events. Reset the cursor when `boot_id` changes. Log formatting and serialization run outside the log's critical sections, and HTTP snapshots copy one bounded entry at a time.
 
 ## Home Assistant
 
@@ -138,6 +151,7 @@ cargo clippy --locked -p han-core -p han-mqtt -p han-config --all-targets -- -D 
 HAN_CONFIG=config.example.toml cargo clippy --locked --release \
   -p han-firmware --target riscv32imc-unknown-none-elf -- -D warnings
 cargo fmt --all -- --check
+node scripts/test-web-ui.cjs
 bash scripts/test-mqtt.sh
 ```
 
@@ -154,6 +168,7 @@ The software tests do not replace these checks on the actual meter and board:
 5. Run for 24 hours using P1 power, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability.
 6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
 7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.
+8. With USB disconnected and HAN/P1 connected, open the diagnostic log. Verify that counters advance, error types and gaps appear, pause/resume works, and the downloaded text includes the counters and events. Compare UART error growth with the page open and closed; reconnect the network and restart the device to check log recovery and reset detection.
 
 If no telegrams arrive, check meter activation and the data-request line. If invalid frames or UART errors rise, check signal inversion, the pull-up/interface wiring, baud rate, and that the meter is using the ASCII profile. Failure to connect to Wi-Fi or MQTT does not stop reception.
 

@@ -2,6 +2,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use han_config::{
     MqttSettings,
     control::Control,
+    diagnostics::{Log, Snapshot as Diagnostics, UartErrors},
     web::{self, Application, SaveError},
 };
 use std::cell::Cell;
@@ -14,6 +15,7 @@ struct App {
     control: Control<NoopRawMutex>,
     failing: Cell<bool>,
     writes: Cell<usize>,
+    log: Log<NoopRawMutex>,
 }
 impl App {
     fn new() -> Self {
@@ -21,12 +23,31 @@ impl App {
             control: Control::new(MqttSettings::new("broker", 1883, "meter", "secret").unwrap()),
             failing: Cell::new(false),
             writes: Cell::new(0),
+            log: Log::new(),
         }
     }
 }
 impl Application for App {
     fn snapshot(&self) -> han_config::control::Snapshot {
         self.control.snapshot()
+    }
+    fn diagnostics(&self, after: u64) -> Diagnostics {
+        Diagnostics {
+            boot_id: 123,
+            uptime_ms: 65_000,
+            valid_frames: 60,
+            invalid_frames: 2,
+            uart_errors: 45,
+            uart_error_types: UartErrors {
+                overflow: 40,
+                framing: 5,
+                ..Default::default()
+            },
+            last_valid_age_ms: Some(250),
+            last_interval_ms: Some(1000),
+            max_interval_ms: Some(3000),
+            log: self.log.page(after),
+        }
     }
     fn storage_available(&self) -> bool {
         !self.failing.get()
@@ -172,4 +193,62 @@ async fn storage_failure_and_incomplete_request_preserve_active_settings() {
     assert_eq!(app.writes.get(), 0);
     let response = exchange(&app, &update).await;
     assert!(response.starts_with("HTTP/1.1 200"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostics_are_paginated_uncached_and_exclude_credentials() {
+    let app = App::new();
+    for i in 1..=20 {
+        app.log
+            .record(i * 1000, format_args!("UART FifoOverflowed; count={i}"));
+    }
+    // Diagnostics remain usable even when settings storage has failed.
+    app.failing.set(true);
+    let response = exchange(
+        &app,
+        "GET /api/diagnostics HTTP/1.1\r\nHost: device\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store")
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["uart_errors"], 45);
+    assert_eq!(body["uart_error_types"]["overflow"], 40);
+    assert_eq!(body["max_interval_ms"], 3000);
+    assert_eq!(body["log"]["entries"].as_array().unwrap().len(), 4);
+    assert_eq!(body["log"]["more"], true);
+    assert_eq!(body["log"]["next_after"], 4);
+    for private in ["secret", "broker", "username", "password"] {
+        assert!(!response.contains(private));
+    }
+    let response = exchange(
+        &app,
+        "GET /api/diagnostics?after=16 HTTP/1.1\r\nHost: device\r\n\r\n",
+    )
+    .await;
+    let body: serde_json::Value =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["log"]["entries"].as_array().unwrap().len(), 4);
+    assert_eq!(body["log"]["entries"][0]["sequence"], 17);
+    assert_eq!(body["log"]["more"], false);
+    assert_eq!(body["log"]["next_after"], 20);
+    let response = exchange(
+        &app,
+        "GET /api/diagnostics?after=bad HTTP/1.1\r\nHost: device\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 400"));
+    let response = exchange(
+        &app,
+        "GET /api/diagnostics HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert!(!response.contains("FifoOverflowed"));
+    assert_eq!(app.writes.get(), 0);
 }

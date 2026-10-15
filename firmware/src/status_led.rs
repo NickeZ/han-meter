@@ -1,4 +1,5 @@
 //! Waveshare ESP32-C3-Zero onboard WS2812: GPIO10, RGB byte order.
+use crate::diagnostics::log;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::{
@@ -7,7 +8,6 @@ use esp_hal::{
     rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator},
     time::Rate,
 };
-use esp_println::println;
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const GREEN_BRIGHTNESS: u8 = 16;
@@ -58,7 +58,7 @@ pub(crate) async fn run(peripheral: RMT<'static>, pin: GPIO10<'static>) {
             Ok(Ok(()))
         );
         if !sent {
-            println!("Status LED update failed");
+            log!("Status LED update failed");
         }
 
         connected = if connected && sent {

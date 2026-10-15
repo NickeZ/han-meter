@@ -1,3 +1,4 @@
+use crate::diagnostics::log;
 use alloc::string::String;
 use core::cell::RefCell;
 use embassy_net::Stack;
@@ -5,7 +6,6 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
 use embedded_storage::nor_flash::ReadNorFlash;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
-use esp_println::println;
 use esp_storage::FlashStorage;
 use han_config::{
     MqttSettings,
@@ -30,13 +30,13 @@ pub(crate) fn initialize(
     .expect("Validated MQTT defaults");
     let store = match storage_offset(&mut flash).and_then(|offset| {
         Store::open(flash, offset).map_err(|error| {
-            println!(
+            log!(
                 "MQTT settings journal at {:#x} could not be opened: {:?}",
                 offset, error
             );
             match error {
                 StorageError::ForeignData => {
-                    println!(
+                    log!(
                         "To discard the old settings region, exit the USB monitor and run: espflash erase-region --chip esp32c3 --port /dev/ttyACM0 {:#x} {:#x}",
                         offset, STORAGE_SIZE
                     );
@@ -49,7 +49,7 @@ pub(crate) fn initialize(
     }) {
         Ok(store) => Some(store),
         Err(reason) => {
-            println!(
+            log!(
                 "MQTT settings storage unavailable: {}. Using firmware defaults; web saving disabled.",
                 reason
             );
@@ -61,7 +61,7 @@ pub(crate) fn initialize(
         .and_then(Store::load)
         .cloned()
         .unwrap_or(defaults);
-    println!(
+    log!(
         "MQTT settings source: {}",
         if store.as_ref().and_then(Store::load).is_some() {
             "saved"
@@ -79,7 +79,7 @@ fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, &'static str> {
     let capacity = ReadNorFlash::capacity(flash) as u32;
     let mut bytes = [0; PARTITION_TABLE_MAX_LEN];
     let table = read_partition_table(flash, &mut bytes).map_err(|error| {
-        println!("MQTT settings partition table error: {:?}", error);
+        log!("MQTT settings partition table error: {:?}", error);
         "could not read or validate the partition table"
     })?;
     let mut region = None;
@@ -98,7 +98,7 @@ fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, &'static str> {
                 .checked_add(entry.len())
                 .is_none_or(|end| end > capacity)
         {
-            println!(
+            log!(
                 "MQTT settings nvs partition: type={:#x} subtype={:#x} flags={:#x} offset={:#x} length={:#x} flash_capacity={:#x}",
                 entry.raw_type(),
                 entry.raw_subtype(),
@@ -145,6 +145,10 @@ impl web::Application for HttpApplication {
         self.control.snapshot()
     }
 
+    fn diagnostics(&self, after: u64) -> han_config::diagnostics::Snapshot {
+        crate::diagnostics::snapshot(after)
+    }
+
     fn save(&self, settings: MqttSettings) -> Result<bool, web::SaveError> {
         if self.control.snapshot().settings == settings {
             return Ok(false);
@@ -152,14 +156,14 @@ impl web::Application for HttpApplication {
         let mut store = self.store.borrow_mut();
         let store = store.as_mut().ok_or(web::SaveError)?;
         store.save(&settings).map_err(|error| {
-            println!(
+            log!(
                 "MQTT settings save failed: {:?}; active settings unchanged",
                 error
             );
             web::SaveError
         })?;
         let changed = self.control.apply(settings);
-        println!("MQTT settings saved");
+        log!("MQTT settings saved");
         Ok(changed)
     }
 
@@ -217,7 +221,7 @@ pub(crate) async fn address_log(stack: Stack<'static>) {
         let address = stack.config_v4().map(|config| config.address.address());
         if address != previous {
             if let Some(address) = address {
-                println!("MQTT settings page: http://{}/", address);
+                log!("MQTT settings page: http://{}/", address);
             }
             previous = address;
         }

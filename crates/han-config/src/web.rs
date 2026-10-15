@@ -6,7 +6,7 @@ use crate::{
 use heapless::String;
 use picoserve::{
     Router,
-    extract::{FromRequest, FromRequestParts, State},
+    extract::{FromRequest, FromRequestParts, Query, State},
     request::{RequestBody, RequestParts},
     response::{Json, StatusCode},
     routing::{PathRouter, get},
@@ -18,6 +18,7 @@ pub const HTTP_BUFFER_SIZE: usize = 6144;
 
 pub trait Application {
     fn snapshot(&self) -> Snapshot;
+    fn diagnostics(&self, after: u64) -> crate::diagnostics::Snapshot;
     fn save(&self, settings: MqttSettings) -> Result<bool, SaveError>;
     fn storage_available(&self) -> bool;
     /// Accept the current device IP or advertised DHCP hostname (optional :80).
@@ -183,10 +184,19 @@ struct SaveResponse {
     message: &'static str,
 }
 
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default)]
+    after: u64,
+}
+
 pub fn router<A: Application>(app: &A) -> Router<impl PathRouter + '_> {
     Router::new()
         .route("/", get(async |_: LocalRequest| {
             Html
+        }))
+        .route("/api/diagnostics", get(async |_: LocalRequest, State(app): State<&A>, Query(query): Query<LogQuery>| {
+            Json(app.diagnostics(query.after)).into_response().with_header("Cache-Control", "no-store")
         }))
         .route("/api/mqtt", get(async |_: LocalRequest, State(app): State<&A>| {
             let state = app.snapshot();

@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod diagnostics;
 mod network;
 mod settings;
 mod status_led;
@@ -11,6 +12,7 @@ mod config {
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
 }
 
+use crate::diagnostics::log;
 use core::cell::RefCell;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -28,7 +30,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
     uart::{Config, DataBits, Parity, StopBits, UartRx},
 };
-use esp_println::println;
+use han_config::diagnostics::RateLimit;
 use han_core::{Decoder, Telemetry, discovery};
 use static_cell::StaticCell;
 
@@ -49,6 +51,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, interrupts.software_interrupt0);
+    diagnostics::initialize(Rng::new().random());
     spawner.spawn(status_led::run(peripherals.RMT, peripherals.GPIO10).unwrap());
     let (mqtt_settings, settings_store) =
         settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
@@ -65,7 +68,7 @@ async fn main(spawner: Spawner) -> ! {
     .with_rx(InputSignal::from(peripherals.GPIO0).with_input_inverter(true))
     .into_async();
     spawner.spawn(receive(rx).unwrap());
-    spawner.spawn(diagnostics().unwrap());
+    spawner.spawn(report_diagnostics().unwrap());
 
     let (controller, interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("Wi-Fi initialization");
@@ -87,7 +90,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(network::wifi(controller).unwrap());
     spawner.spawn(settings::http(stack, mqtt_settings, settings_store, hostname.clone()).unwrap());
     spawner.spawn(settings::address_log(stack).unwrap());
-    println!(
+    log!(
         "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
         env!("CARGO_PKG_VERSION"),
         id,
@@ -102,25 +105,37 @@ async fn receive(mut rx: UartRx<'static, Async>) {
     static DECODER: StaticCell<Decoder> = StaticCell::new();
     let decoder = DECODER.init(Decoder::new());
     let mut bytes = [0; 128];
+    let mut uart_logs: [RateLimit; 5] = core::array::from_fn(|_| RateLimit::default());
+    let mut invalid_logs = RateLimit::default();
     loop {
         match rx.read_async(&mut bytes).await {
             Ok(len) => {
                 for &byte in &bytes[..len] {
                     if let Some(result) = decoder.push(byte) {
-                        TELEMETRY.lock(|state| {
-                            let mut state = state.borrow_mut();
-                            match result {
-                                Ok(snapshot) => state.update(snapshot, Instant::now().as_millis()),
-                                Err(_) => {
+                        let now_ms = Instant::now().as_millis();
+                        match result {
+                            Ok(snapshot) => {
+                                TELEMETRY.lock(|state| state.borrow_mut().update(snapshot, now_ms));
+                                diagnostics::valid_telegram(now_ms);
+                            }
+                            Err(error) => {
+                                TELEMETRY.lock(|state| {
+                                    let mut state = state.borrow_mut();
                                     state.invalid_frames = state.invalid_frames.saturating_add(1)
+                                });
+                                if invalid_logs.admit(now_ms) {
+                                    diagnostics::record(format_args!(
+                                        "Telegram rejected: {:?}",
+                                        error
+                                    ));
                                 }
                             }
-                        });
+                        }
                         UPDATED.signal(());
                     }
                 }
             }
-            Err(_) => {
+            Err(error) => {
                 decoder.reset();
                 TELEMETRY.lock(|state| {
                     let mut state = state.borrow_mut();
@@ -128,6 +143,13 @@ async fn receive(mut rx: UartRx<'static, Async>) {
                 });
                 // The HAL clears reported error flags; drain any buffered tail before resync.
                 let _ = rx.read_buffered(&mut bytes);
+                let (kind, count) = diagnostics::uart_error(error);
+                if uart_logs[kind].admit(Instant::now().as_millis()) {
+                    diagnostics::record(format_args!(
+                        "UART {:?}; count={}; partial telegram discarded",
+                        error, count
+                    ));
+                }
                 Timer::after(Duration::from_millis(1)).await;
             }
         }
@@ -135,11 +157,11 @@ async fn receive(mut rx: UartRx<'static, Async>) {
 }
 
 #[embassy_executor::task]
-async fn diagnostics() {
+async fn report_diagnostics() {
     loop {
         Timer::after(Duration::from_secs(60)).await;
         let state = telemetry();
-        println!(
+        log!(
             "uptime={}s valid={} invalid={} uart_errors={} meter_fresh={}",
             Instant::now().as_secs(),
             state.valid_frames,

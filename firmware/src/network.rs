@@ -1,8 +1,8 @@
+use crate::diagnostics::log;
 use crate::settings::SettingsControl;
 use crate::{UPDATED, config, status_led, telemetry};
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_println::println;
 use esp_radio::wifi::{Config, Interface, PowerSaveMode, WifiController, sta::StationConfig};
 use han_config::{MqttSettings, control::Status};
 use han_core::Backoff;
@@ -30,30 +30,30 @@ pub(crate) async fn wifi(mut controller: WifiController<'static>) {
     let mut retry = Backoff::new();
     loop {
         if let Err(error) = controller.set_config(&config) {
-            println!("Wi-Fi configuration failed: {:?}", error);
+            log!("Wi-Fi configuration failed: {:?}", error);
         } else {
             // Modem sleep reduces average P1 power demand; CPU/UART stay awake.
             let _ = controller.set_power_saving(PowerSaveMode::Minimum);
             match with_timeout(Duration::from_secs(30), controller.connect_async()).await {
                 Ok(Ok(_)) => {
                     status_led::set_wifi_connected(true);
-                    println!("Wi-Fi connected");
+                    log!("Wi-Fi connected");
                     let connected_at = Instant::now();
                     let _ = controller.wait_for_disconnect_async().await;
                     status_led::set_wifi_connected(false);
                     if connected_at.elapsed() >= Duration::from_secs(60) {
                         retry.reset();
                     }
-                    println!("Wi-Fi disconnected");
+                    log!("Wi-Fi disconnected");
                 }
                 _ => {
-                    println!("Wi-Fi connection failed");
+                    log!("Wi-Fi connection failed");
                     let _ = with_timeout(IO_TIMEOUT, controller.disconnect_async()).await;
                 }
             }
         }
         let delay = retry.next_seconds();
-        println!("Wi-Fi retry in {}s", delay);
+        log!("Wi-Fi retry in {}s", delay);
         Timer::after(Duration::from_secs(delay)).await;
     }
 }
@@ -107,12 +107,12 @@ pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static Setti
             };
             control.set_status(revision, Status::Disconnected, Some(message));
             match error {
-                Error::Mqtt(reason) => println!("MQTT session ended: {:?}", reason),
-                _ => println!("MQTT connection failed: {:?}", error),
+                Error::Mqtt(reason) => log!("MQTT session ended: {:?}", reason),
+                _ => log!("MQTT connection failed: {:?}", error),
             }
         }
         let delay = retry.next_seconds();
-        println!("MQTT retry in {}s", delay);
+        log!("MQTT retry in {}s", delay);
         if control
             .until_changed(revision, Timer::after(Duration::from_secs(delay)))
             .await
@@ -175,6 +175,6 @@ impl han_mqtt::Application for FirmwareApplication<'_> {
     fn connected(&self) {
         self.control
             .set_status(self.revision, Status::Connected, None);
-        println!("MQTT connected");
+        log!("MQTT connected");
     }
 }
