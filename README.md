@@ -4,12 +4,35 @@ Bare-metal Rust firmware for the **Waveshare ESP32-C3-Zero** that reads Swedish 
 
 ## Hardware and protocol
 
-- The board is a [Waveshare ESP32-C3-Zero](https://docs.waveshare.com/ESP32-C3-Zero), based on the ESP32-C3FH4 with 4 MB flash.
-- Its onboard WS2812 RGB LED connects to **GPIO10** and uses [RGB byte order](https://docs.waveshare.com/ESP32-C3-Zero/FAQ). It blinks dim green (500 ms on, 500 ms off) while Wi-Fi is disconnected, turns off when the device joins the access point, and resumes blinking after a disconnect. An asynchronous RMT task drives the LED independently of meter reception and MQTT.
-- P1 data connects directly to **GPIO0**, with an **external 3.3 V pull-up**. The firmware enables input inversion in the GPIO matrix and uses UART1 at **115200 baud, 8N1**.
-- The P1 data-request pin is already held high by the hardware. No GPIO output or UART TX is configured for the meter.
-- The board is powered from P1 through its regulator. Native USB Serial/JTAG is used for flashing and diagnostic logs; reception and connection diagnostics are also available from the device's web page while connected to P1.
-- The meter's customer port must be activated by the network operator. This firmware expects the Swedish ASCII profile, with `/` framing, OBIS records, and `!` followed by four hexadecimal CRC digits and CRLF. Binary HAN/DLMS telegrams are not supported.
+The board is a [Waveshare ESP32-C3-Zero](https://docs.waveshare.com/ESP32-C3-Zero), based on the ESP32-C3FH4 with 4 MB flash.
+
+### Passive splitter and Easee Equalizer
+
+The current installation shares the meter's HAN/P1 port between an **Easee Equalizer** and this board using a **passive port splitter**. The Equalizer holds the P1 **data-request line high** so the meter sends telegrams, and supplies the **pull-up on the shared data line connected to UART RX**. There is no separate RX pull-up resistor on the ESP32 branch in this setup.
+
+The ESP32 only listens to the shared data line. The firmware configures neither a data-request GPIO output nor a UART TX pin for the meter. The UART driver enables a weak internal RX pull-up, but this wiring relies on the Equalizer's external pull-up. The passive splitter only joins the connections; it does not generate a request signal, provide a pull-up, buffer the data, or translate voltage levels.
+
+Keep the Equalizer connected and powered for this arrangement to work. Without it, the request signal and RX pull-up must be supplied by suitable external hardware. A standalone installation needs both a data-request circuit meeting the meter's requirements and an external pull-up/interface that presents a **3.3 V-compatible signal** to GPIO0; the firmware does not provide either function.
+
+### Wiring and requirements
+
+| Connection | Requirement |
+| --- | --- |
+| P1 data | Connect to **GPIO0**. The firmware uses UART1 at **115200 baud, 8N1**, with input inversion in the GPIO matrix. The board pad labelled `RX` is GPIO20, not the input used by this firmware. |
+| P1 data request | Held high by the Equalizer through the splitter; no connection to an ESP32 output is needed. |
+| Ground | Connect the meter's signal ground and power return to board **GND** as specified by the meter's pinout, providing a common reference for the shared data line. |
+| P1 power | Feed the meter's **5 V** supply to the board's **5V** pad, through its onboard 3.3 V regulator. Do not feed 5 V into the **3V3** pad or GPIO0. |
+| USB | Use a USB-C **data cable** for flashing and native USB Serial/JTAG logs. USB is not required during normal P1-powered operation. |
+
+- **Meter compatibility:** the customer port must be activated by the network operator. This firmware expects the Swedish ASCII profile, with `/` framing, OBIS records, and `!` followed by four hexadecimal CRC digits and CRLF. Binary HAN/DLMS telegrams are not supported; a port labelled HAN is not sufficient to establish compatibility.
+- **Splitter and cables:** use a P1-compatible passive splitter and cables that preserve the required power, ground, data, and data-request connections to both branches. Check the meter's connector pinout and cable continuity rather than relying on wire colours or the connector's appearance.
+- **RX voltage:** verify the shared data line's high level before connecting GPIO0. The Equalizer supplies the pull-up in this installation, but its presence alone does not establish voltage compatibility for other models or wiring. ESP32-C3 GPIOs use 3.3 V logic and must not be driven by a 5 V pull-up; use a suitable level interface if necessary. Firmware inversion changes signal polarity, not voltage. See the [ESP32-C3 electrical characteristics](https://documentation.espressif.com/esp32-c3_datasheet_en.html).
+- **Power budget:** the meter must supply enough current for the Equalizer and ESP32 together, including Wi-Fi transmit and reconnect peaks. A passive splitter adds no power capacity. P1 power availability and limits depend on the meter; verify them in its documentation. If an external supply is needed, isolate its supply feed from the meter's power output to avoid backfeeding. Check the power paths before connecting USB and P1 power simultaneously.
+- **Network coverage:** provide a usable 2.4 GHz WPA2 personal Wi-Fi signal at the meter and access to the MQTT broker. Check reception with the meter cabinet closed.
+
+The board's power input, GPIO voltage, and pin labels are documented in the [Waveshare hardware description](https://docs.waveshare.com/ESP32-C3-Zero#hardware-description). Reception and connection diagnostics are also available from the device's web page while connected to P1.
+
+The onboard WS2812 RGB LED connects to **GPIO10** and uses [RGB byte order](https://docs.waveshare.com/ESP32-C3-Zero/FAQ). It blinks dim green (500 ms on, 500 ms off) while Wi-Fi is disconnected, turns off when the device joins the access point, and resumes blinking after a disconnect. An asynchronous RMT task drives the LED independently of meter reception and MQTT.
 
 The application runs at 80 MHz and enables minimum Wi-Fi modem sleep. UART reception stays active during network failures. The application uses `no_std`, `esp-hal`, Embassy/`esp-rtos`, `esp-radio`, and `embassy-net`; the ESP-IDF bootloader format is used without the ESP-IDF application runtime. Wi-Fi and MQTT use a fixed 96 KiB allocator arena. Telegram parsing does not allocate.
 
@@ -171,11 +194,11 @@ The software tests do not replace these checks on the actual meter and board:
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.
 3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility. Verify its two diagnostic sensors update every minute and the telegram age increases when P1 input stops while MQTT stays connected.
 4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes. Check that the green blink resumes during Wi-Fi outages and stops after reconnection, including when MQTT is unavailable.
-5. Run for 24 hours using P1 power, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability.
+5. Run for 24 hours using P1 power with the Equalizer connected through the passive splitter, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability on both devices.
 6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
 7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.
 8. With USB disconnected and HAN/P1 connected, open the diagnostic log and confirm `UART DMA active`. Verify that DMA bytes and valid telegram counts advance, pause/resume works, and the downloaded text includes the counters and events. Compare UART and DMA error growth with the page open and closed; reconnect the network and restart the device to check log recovery and reset detection. Repeatedly save settings and verify reception resumes after any logged DMA recovery. Unplug/reconnect the meter input and verify that short final chunks and subsequent telegrams are delivered without waiting for another telegram.
 
-If no telegrams arrive, check meter activation and the data-request line. If invalid frames or UART errors rise, check signal inversion, the pull-up/interface wiring, baud rate, and that the meter is using the ASCII profile. Failure to connect to Wi-Fi or MQTT does not stop reception.
+If no telegrams arrive, check meter activation, splitter/cable continuity, and that the Equalizer is connected and powered so it supplies the data-request signal and RX pull-up. If invalid frames or UART errors rise, check signal inversion, the pull-up/interface wiring and voltage, common ground, baud rate, and that the meter is using the ASCII profile. Failure to connect to Wi-Fi or MQTT does not stop reception.
 
 Protocol references: [Swedish customer-interface recommendation v2.0](https://www.energiforetagen.se/globalassets/energiforetagen/det-erbjuder-vi/kurser-och-konferenser/elnat/branschrekommendation-lokalt-granssnitt-v2_0-201912.pdf), [Home Assistant MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery), and [Home Assistant sensor metadata](https://www.home-assistant.io/integrations/sensor/).
