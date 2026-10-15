@@ -21,7 +21,7 @@ esp-bootloader-esp-idf = { version = "=0.5.0", features = ["esp32c3"] }
 esp-println = { version = "=0.17.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
 esp-backtrace = { version = "=0.19.0", features = ["esp32c3", "panic-handler", "println"] }
 embassy-executor = "=0.10.0"
-embassy-net = { version = "=0.9.1", features = ["tcp", "udp", "dhcpv4", "dns", "medium-ethernet"] }
+embassy-net = { version = "=0.9.1", features = ["tcp", "udp", "dhcpv4-hostname", "dns", "medium-ethernet"] }
 embassy-time = "=0.5.1"
 embassy-sync = "=0.8.0"
 static_cell = "=2.1.1"

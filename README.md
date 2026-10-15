@@ -22,6 +22,8 @@ cp config.example.toml config.toml
 
 Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and MQTT broker details. The first version supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname or IPv4 address; `.local` mDNS resolution is not implemented.
 
+The firmware sends a DHCP hostname of `han-` followed by the station MAC address as twelve lowercase hexadecimal digits (for example, `han-aabbccddeeff`). The USB startup log shows the name. Routers that display DHCP hostnames can use it in their client list; a cached entry may take time to refresh after reflashing. `device_name` controls the Home Assistant display name. DHCP hostname advertisement does not provide a `.local` mDNS name.
+
 `config.toml` is ignored by Git. Configuration is compiled into the firmware, so changing it requires rebuilding and flashing. Firmware binaries and generated build files also contain those settings. Credentials are never printed in logs or configuration parse errors.
 
 ```sh
@@ -101,7 +103,7 @@ The broker test requires Docker. It starts an isolated Mosquitto container with 
 
 The software tests do not replace these checks on the actual meter and board:
 
-1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, and 115200 8N1; verify Wi-Fi and MQTT connection logs.
+1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, 115200 8N1, and the DHCP hostname; verify Wi-Fi and MQTT connection logs and check the router's client list for the hostname.
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.
 3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility.
 4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes.

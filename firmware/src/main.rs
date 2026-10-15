@@ -65,21 +65,26 @@ async fn main(spawner: Spawner) -> ! {
     let (controller, interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("Wi-Fi initialization");
     let id = discovery::device_id(interfaces.station.mac_address());
+    // DHCP hostnames use hyphens; keep the MQTT/Home Assistant identifier unchanged.
+    let hostname = id.replace('_', "-");
+    let mut dhcp = embassy_net::DhcpConfig::default();
+    dhcp.hostname = Some(hostname.as_str().try_into().expect("DHCP hostname length"));
     let rng = Rng::new();
     let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
     static RESOURCES: StaticCell<embassy_net::StackResources<3>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         interfaces.station,
-        embassy_net::Config::dhcpv4(Default::default()),
+        embassy_net::Config::dhcpv4(dhcp),
         RESOURCES.init(embassy_net::StackResources::new()),
         seed,
     );
     spawner.spawn(network::runner(runner).unwrap());
     spawner.spawn(network::wifi(controller).unwrap());
     println!(
-        "han-meter {} device={} RX=GPIO0 inverted 115200 8N1",
+        "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
         env!("CARGO_PKG_VERSION"),
-        id
+        id,
+        hostname
     );
     network::run(stack, &id).await
 }
