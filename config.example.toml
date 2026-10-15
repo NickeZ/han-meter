@@ -1,0 +1,13 @@
+# Copy to config.toml (ignored by Git) and edit before flashing.
+device_name = "HAN meter"
+
+[wifi]
+ssid = "CHANGE_ME"
+password = "CHANGE_ME"
+
+[mqtt]
+# IPv4 address or DNS hostname; .local/mDNS is not supported.
+host = "mqtt.example.net"
+port = 1883
+username = "han-meter"
+password = "CHANGE_ME"
