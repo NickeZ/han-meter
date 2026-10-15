@@ -96,6 +96,8 @@ The device retains its latest 64 events with messages limited to 160 bytes, over
 
 The diagnostic API uses the same local Host checks as the settings API, returns `Cache-Control: no-store`, and includes a `boot_id`, millisecond timestamps, counters, and a `log` object. Use `log.next_after` as the next cursor; `log.more` indicates another page and `log.lost` indicates overwritten events. Reset the cursor when `boot_id` changes. Log formatting and serialization run outside the log's critical sections, and HTTP snapshots copy one bounded entry at a time.
 
+The settings and diagnostic JSON responses use bounded heap allocations to keep large values out of nested HTTP futures. HTTP tests enforce a future-size budget, and the firmware linker requires at least 80 KiB of main stack headroom. These checks catch memory growth that a successful host HTTP test alone would miss.
+
 ## Home Assistant
 
 Enable the MQTT integration and discovery in Home Assistant, using the same MQTT 5 broker. The firmware discovers two diagnostic sensors on connection and adds supported meter readings once a valid telegram arrives, all under one device. The device identifier is `han_` followed by the station MAC address as twelve lowercase hexadecimal digits. Renaming the device does not change entity identifiers.

@@ -80,9 +80,15 @@ async fn exchange(app: &App, request: &str) -> String {
             write: picoserve::time::Duration::from_secs(1),
         });
         let mut buffer = [0; web::HTTP_BUFFER_SIZE];
-        let _ = picoserve::Server::new_tokio(&router, &config, &mut buffer)
-            .serve(socket)
-            .await;
+        let connection = picoserve::Server::new_tokio(&router, &config, &mut buffer).serve(socket);
+        // Large owned responses are duplicated through the router's nested
+        // futures. Host execution tolerates this; the ESP32's stack does not.
+        let bytes = core::mem::size_of_val(&connection);
+        assert!(
+            bytes <= 32 * 1024,
+            "HTTP future grew to {bytes} bytes; keep responses indirect"
+        );
+        let _ = connection.await;
     };
     let client = async {
         let mut socket = TcpStream::connect(address).await.unwrap();

@@ -40,6 +40,11 @@ fn check_text(name: &str, value: &str, min: usize, max: usize) {
 
 fn main() {
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+    println!("cargo:rerun-if-changed=memory.x");
+    println!(
+        "cargo:rustc-link-arg=-T{}/memory.x",
+        env::var("CARGO_MANIFEST_DIR").unwrap()
+    );
     println!("cargo:rerun-if-env-changed=HAN_CONFIG");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("..");
     let path = env::var_os("HAN_CONFIG")

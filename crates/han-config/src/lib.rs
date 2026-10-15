@@ -1,6 +1,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "web")]
+extern crate alloc;
+
 pub mod control;
 pub mod diagnostics;
 pub mod storage;

@@ -6,7 +6,7 @@ rust-version.workspace = true
 
 [features]
 default = ["web"]
-web = ["dep:picoserve"]
+web = ["dep:picoserve", "serde/alloc"]
 
 [dependencies]
 heapless = { version = "=0.9.1", features = ["serde"] }

@@ -3,6 +3,7 @@ use crate::{
     MqttSettings,
     control::{Snapshot, Status},
 };
+use alloc::boxed::Box;
 use heapless::String;
 use picoserve::{
     Router,
@@ -196,11 +197,14 @@ pub fn router<A: Application>(app: &A) -> Router<impl PathRouter + '_> {
             Html
         }))
         .route("/api/diagnostics", get(async |_: LocalRequest, State(app): State<&A>, Query(query): Query<LogQuery>| {
-            Json(app.diagnostics(query.after)).into_response().with_header("Cache-Control", "no-store")
+            // Keep the bounded snapshot behind a pointer. Owning it inline here
+            // multiplies its size through picoserve's nested response futures,
+            // exhausting the ESP32's stack when any HTTP route is polled.
+            Json(Box::new(app.diagnostics(query.after))).into_response().with_header("Cache-Control", "no-store")
         }))
         .route("/api/mqtt", get(async |_: LocalRequest, State(app): State<&A>| {
             let state = app.snapshot();
-            Json(View {
+            Json(Box::new(View {
                 host: state.settings.host,
                 port: state.settings.port,
                 username: state.settings.username,
@@ -208,7 +212,7 @@ pub fn router<A: Application>(app: &A) -> Router<impl PathRouter + '_> {
                 status: state.status,
                 last_error: state.last_error,
                 storage_available: app.storage_available(),
-            }).into_response().with_header("Cache-Control", "no-store")
+            })).into_response().with_header("Cache-Control", "no-store")
         }).post(async |_: WriteRequest, State(app): State<&A>, Body(update): Body| {
             let result = finish_update(update, &app.snapshot().settings);
             let (status, response) = match result {
