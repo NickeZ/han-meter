@@ -63,13 +63,15 @@ The page uses plain HTTP without a login, intended for a trusted local network. 
 
 Saved settings override the compiled MQTT defaults, including after ordinary reflashing. The firmware uses its own checksummed, two-sector journal in the first 8 KiB of the existing `nvs` data partition; it does not use the ESP-IDF NVS format or change the partition layout. Unchanged saves do not write flash. An interrupted update preserves the previous committed record, and blank or corrupt records fall back to the firmware defaults. If the partition is missing, overlaps other data, contains an unsupported format, or cannot be read safely, the firmware uses defaults and disables saving. A flash-write failure keeps the current runtime settings active and disables further writes until restart.
 
-To clear saved MQTT settings or reclaim `nvs` from a previous firmware, erase that data partition over USB and restart:
+To clear saved MQTT settings or reclaim `nvs` from a previous firmware, exit the USB monitor with **Ctrl+C**, erase that data partition over USB, and restart. For the default layout, the boot log lists `nvs` at offset `0x9000` with length `0x6000`:
 
 ```sh
-espflash erase-parts --chip esp32c3 --port /dev/ttyACM0 nvs
+espflash erase-region --chip esp32c3 --port /dev/ttyACM0 0x9000 0x6000
 ```
 
-This erases the entire `nvs` partition. On this firmware it restores the compiled MQTT defaults; Wi-Fi credentials and the application remain in the firmware image. Changing MQTT defaults in `config.toml` alone does not replace a saved override.
+Use these addresses only when they match your device's boot log, and replace the port if needed. This erases the entire `nvs` partition. On this firmware it restores the compiled MQTT defaults; Wi-Fi credentials and the application remain in the firmware image. Changing MQTT defaults in `config.toml` alone does not replace a saved override. In espflash 4.5.0, `erase-parts` requires an explicit `--partition-table <FILE>`; it does not read the partition table from the device.
+
+If the page reports **Configuration storage is unavailable**, check the USB startup log for the specific reason. `ForeignData` means the journal contains unrecognized data (for example, ESP-IDF NVS from earlier firmware) or settings from an unsupported version. A valid partition table does not mean that its contents are usable. Ordinary `cargo flash` preserves this data. To discard it, exit the monitor with **Ctrl+C**, run the `erase-region` command above with your device's port, then restart the device and reload the page. The firmware also prints a command using the detected journal address that erases only its two sectors. No full-chip erase is needed. For partition-table, geometry, or read errors, use the reported error to investigate the flash layout or access failure before erasing anything.
 
 The browser uses these local HTTP endpoints:
 

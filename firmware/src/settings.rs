@@ -10,7 +10,7 @@ use esp_storage::FlashStorage;
 use han_config::{
     MqttSettings,
     control::Control,
-    storage::{SECTOR_SIZE, STORAGE_SIZE, Store},
+    storage::{Error as StorageError, SECTOR_SIZE, STORAGE_SIZE, Store},
     web,
 };
 use static_cell::StaticCell;
@@ -28,13 +28,30 @@ pub(crate) fn initialize(
         crate::config::MQTT_PASSWORD,
     )
     .expect("Validated MQTT defaults");
-    let store = match storage_offset(&mut flash)
-        .and_then(|offset| Store::open(flash, offset).map_err(|_| ()))
-    {
-        Ok(store) => Some(store),
-        Err(()) => {
+    let store = match storage_offset(&mut flash).and_then(|offset| {
+        Store::open(flash, offset).map_err(|error| {
             println!(
-                "MQTT settings storage unavailable; using firmware defaults. Check the nvs partition."
+                "MQTT settings journal at {:#x} could not be opened: {:?}",
+                offset, error
+            );
+            match error {
+                StorageError::ForeignData => {
+                    println!(
+                        "To discard the old settings region, exit the USB monitor and run: espflash erase-region --chip esp32c3 --port /dev/ttyACM0 {:#x} {:#x}",
+                        offset, STORAGE_SIZE
+                    );
+                    "nvs contains unrecognized data or an unsupported settings version; ordinary reflashing preserves it"
+                }
+                StorageError::Region => "nvs journal geometry is incompatible with flash storage",
+                _ => "could not read the nvs settings journal",
+            }
+        })
+    }) {
+        Ok(store) => Some(store),
+        Err(reason) => {
+            println!(
+                "MQTT settings storage unavailable: {}. Using firmware defaults; web saving disabled.",
+                reason
             );
             None
         }
@@ -58,10 +75,13 @@ pub(crate) fn initialize(
 
 /// Use the partition already reserved by espflash. Never guess a flash-tail address
 /// or write across an app, bootloader, partition table, or another data partition.
-fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, ()> {
+fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, &'static str> {
     let capacity = ReadNorFlash::capacity(flash) as u32;
     let mut bytes = [0; PARTITION_TABLE_MAX_LEN];
-    let table = read_partition_table(flash, &mut bytes).map_err(|_| ())?;
+    let table = read_partition_table(flash, &mut bytes).map_err(|error| {
+        println!("MQTT settings partition table error: {:?}", error);
+        "could not read or validate the partition table"
+    })?;
     let mut region = None;
     for entry in table.iter() {
         if entry.label().split(|&b| b == 0 || b == 0xff).next() != Some(b"nvs".as_slice()) {
@@ -77,23 +97,37 @@ fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, ()> {
                 .offset()
                 .checked_add(entry.len())
                 .is_none_or(|end| end > capacity)
-            || region.replace(entry.offset()).is_some()
         {
-            return Err(());
+            println!(
+                "MQTT settings nvs partition: type={:#x} subtype={:#x} flags={:#x} offset={:#x} length={:#x} flash_capacity={:#x}",
+                entry.raw_type(),
+                entry.raw_subtype(),
+                entry.flags(),
+                entry.offset(),
+                entry.len(),
+                capacity
+            );
+            return Err("nvs partition has an unsupported type, flags, alignment, or size");
+        }
+        if region.replace(entry.offset()).is_some() {
+            return Err("multiple nvs partitions found");
         }
     }
-    let offset = region.ok_or(())?;
+    let offset = region.ok_or("nvs partition is missing")?;
     for entry in table.iter() {
         if entry.offset() == offset {
             // Only the selected nvs entry may cover the journal.
             if entry.label().split(|&b| b == 0 || b == 0xff).next() != Some(b"nvs".as_slice()) {
-                return Err(());
+                return Err("another partition overlaps the nvs settings journal");
             }
             continue;
         }
-        let end = entry.offset().checked_add(entry.len()).ok_or(())?;
+        let end = entry
+            .offset()
+            .checked_add(entry.len())
+            .ok_or("partition address overflows flash address space")?;
         if entry.offset() < offset + STORAGE_SIZE && end > offset {
-            return Err(());
+            return Err("another partition overlaps the nvs settings journal");
         }
     }
     Ok(offset)
@@ -117,8 +151,11 @@ impl web::Application for HttpApplication {
         }
         let mut store = self.store.borrow_mut();
         let store = store.as_mut().ok_or(web::SaveError)?;
-        store.save(&settings).map_err(|_| {
-            println!("MQTT settings save failed; active settings unchanged");
+        store.save(&settings).map_err(|error| {
+            println!(
+                "MQTT settings save failed: {:?}; active settings unchanged",
+                error
+            );
             web::SaveError
         })?;
         let changed = self.control.apply(settings);
