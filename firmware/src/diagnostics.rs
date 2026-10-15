@@ -2,7 +2,7 @@ use core::{cell::RefCell, fmt};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use esp_hal::uart::RxError;
-use han_config::diagnostics::{Log, Snapshot, UartErrors};
+use han_config::diagnostics::{DmaStats, Log, Snapshot, UartErrors};
 
 static LOG: Log<CriticalSectionRawMutex> = Log::new();
 static RX: Mutex<CriticalSectionRawMutex, RefCell<RxStats>> = Mutex::new(RefCell::new(RxStats {
@@ -14,6 +14,11 @@ static RX: Mutex<CriticalSectionRawMutex, RefCell<RxStats>> = Mutex::new(RefCell
         parity: 0,
         other: 0,
     },
+    dma: DmaStats {
+        received_bytes: 0,
+        errors: 0,
+        overruns: 0,
+    },
     last_valid_ms: None,
     last_interval_ms: None,
     max_interval_ms: None,
@@ -22,6 +27,7 @@ static RX: Mutex<CriticalSectionRawMutex, RefCell<RxStats>> = Mutex::new(RefCell
 struct RxStats {
     boot_id: u32,
     errors: UartErrors,
+    dma: DmaStats,
     last_valid_ms: Option<u64>,
     last_interval_ms: Option<u64>,
     max_interval_ms: Option<u64>,
@@ -82,14 +88,33 @@ pub(crate) fn uart_error(error: RxError) -> (usize, u64) {
     })
 }
 
+pub(crate) fn dma_received(bytes: usize) {
+    RX.lock(|state| {
+        let mut state = state.borrow_mut();
+        state.dma.received_bytes = state.dma.received_bytes.saturating_add(bytes as u64);
+    });
+}
+
+pub(crate) fn dma_error(overrun: bool) -> u64 {
+    RX.lock(|state| {
+        let mut state = state.borrow_mut();
+        state.dma.errors = state.dma.errors.saturating_add(1);
+        if overrun {
+            state.dma.overruns = state.dma.overruns.saturating_add(1);
+        }
+        state.dma.errors
+    })
+}
+
 pub(crate) fn snapshot(after: u64) -> Snapshot {
     let now_ms = Instant::now().as_millis();
     let telemetry = crate::telemetry();
-    let (boot_id, uart_error_types, last_interval_ms, max_interval_ms) = RX.lock(|state| {
+    let (boot_id, uart_error_types, dma, last_interval_ms, max_interval_ms) = RX.lock(|state| {
         let state = state.borrow();
         (
             state.boot_id,
             state.errors,
+            state.dma,
             state.last_interval_ms,
             state.max_interval_ms,
         )
@@ -101,6 +126,7 @@ pub(crate) fn snapshot(after: u64) -> Snapshot {
         invalid_frames: telemetry.invalid_frames,
         uart_errors: telemetry.uart_errors,
         uart_error_types,
+        dma,
         last_valid_age_ms: telemetry
             .last_valid_ms
             .map(|last| now_ms.saturating_sub(last)),

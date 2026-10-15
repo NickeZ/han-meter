@@ -150,10 +150,18 @@ pub struct Snapshot {
     pub invalid_frames: u64,
     pub uart_errors: u64,
     pub uart_error_types: UartErrors,
+    pub dma: DmaStats,
     pub last_valid_age_ms: Option<u64>,
     pub last_interval_ms: Option<u64>,
     pub max_interval_ms: Option<u64>,
     pub log: Page,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct DmaStats {
+    pub received_bytes: u64,
+    pub errors: u64,
+    pub overruns: u64,
 }
 
 /// Limit noisy events without preventing their counters from being updated.

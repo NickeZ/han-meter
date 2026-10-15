@@ -43,6 +43,11 @@ impl Application for App {
                 framing: 5,
                 ..Default::default()
             },
+            dma: han_config::diagnostics::DmaStats {
+                received_bytes: 12345,
+                errors: 2,
+                overruns: 1,
+            },
             last_valid_age_ms: Some(250),
             last_interval_ms: Some(1000),
             max_interval_ms: Some(3000),
@@ -225,6 +230,9 @@ async fn diagnostics_are_paginated_uncached_and_exclude_credentials() {
         serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(body["uart_errors"], 45);
     assert_eq!(body["uart_error_types"]["overflow"], 40);
+    assert_eq!(body["dma"]["received_bytes"], 12345);
+    assert_eq!(body["dma"]["errors"], 2);
+    assert_eq!(body["dma"]["overruns"], 1);
     assert_eq!(body["max_interval_ms"], 3000);
     assert_eq!(body["log"]["entries"].as_array().unwrap().len(), 4);
     assert_eq!(body["log"]["more"], true);

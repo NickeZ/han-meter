@@ -52,7 +52,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
 <button id="download-log" type="button" disabled>Download log</button>
 </div>
 <pre id="log" tabindex="0" aria-label="Diagnostic events">Waiting for events…</pre>
-<small>Times are since boot. The device keeps its latest 64 events in RAM; restarting clears them. This browser keeps up to 256 lines. Repeated UART errors are logged at most once per second per type; counters include every error. Rejected telegram messages are also limited to once per second.</small>
+<small>Times are since boot. The device keeps its latest 64 events in RAM; restarting clears them. This browser keeps up to 256 lines. Repeated UART errors are logged at most once per second per type; DMA errors and rejected telegrams are also rate limited. Counters include every error.</small>
 </section>
 <script>
 const element = id => document.getElementById(id);
@@ -133,6 +133,7 @@ async function refreshDiagnostics() {
         'UART errors: ' + data.uart_errors,
         '  Overflow: ' + errors.overflow + ' · Framing: ' + errors.framing,
         '  Glitch: ' + errors.glitch + ' · Parity: ' + errors.parity + ' · Other: ' + errors.other,
+        'DMA bytes: ' + data.dma.received_bytes + ' · Errors: ' + data.dma.errors + ' · Buffer overruns: ' + data.dma.overruns,
         'Last valid telegram: ' + seconds(data.last_valid_age_ms) + ' ago',
         'Last interval: ' + seconds(data.last_interval_ms) + ' · Longest: ' + seconds(data.max_interval_ms)
       ].join('\n');

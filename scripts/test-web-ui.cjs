@@ -38,6 +38,7 @@ const context = vm.createContext({
     return {ok: true, json: async () => ({
       boot_id: boot, uptime_ms: 20_000, valid_frames: 15, invalid_frames: 2,
       uart_errors: 45, uart_error_types: {overflow: 40, framing: 5, glitch: 0, parity: 0, other: 0},
+      dma: {received_bytes: 12345, errors: 2, overruns: 1},
       last_valid_age_ms: 200, last_interval_ms: 1000, max_interval_ms: 3000,
       log: {entries: page, next_after: page.at(-1)?.sequence ?? after, more: remaining.length > 4, lost: false},
     })};
@@ -53,6 +54,7 @@ const click = id => elements.get(id).listeners.click();
   assert.match(elements.get('log').textContent, /FifoOverflowed/);
   assert.match(elements.get('diagnostic-summary').textContent, /Overflow: 40 · Framing: 5/);
   assert.match(elements.get('diagnostic-summary').textContent, /Longest: 3\.000 s/);
+  assert.match(elements.get('diagnostic-summary').textContent, /DMA bytes: 12345 · Errors: 2 · Buffer overruns: 1/);
 
   // Polling from the previous cursor must not duplicate existing events.
   await run('refreshDiagnostics()');
@@ -72,6 +74,7 @@ const click = id => elements.get(id).listeners.click();
   assert.ok(clicked);
   const text = await download.text();
   assert.match(text, /UART errors: 45/);
+  assert.match(text, /DMA bytes: 12345 · Errors: 2 · Buffer overruns: 1/);
   assert.match(text, /FifoOverflowed/);
   assert.doesNotMatch(text, /private-broker|private-user|password/);
 

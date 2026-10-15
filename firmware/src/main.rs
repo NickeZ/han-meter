@@ -5,9 +5,11 @@
 extern crate alloc;
 
 mod diagnostics;
+mod dma_ring;
 mod network;
 mod settings;
 mod status_led;
+mod uart_dma;
 mod config {
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
 }
@@ -22,13 +24,8 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::{
-    Async,
-    clock::CpuClock,
-    gpio::interconnect::InputSignal,
-    interrupt::software::SoftwareInterruptControl,
-    rng::Rng,
+    clock::CpuClock, interrupt::software::SoftwareInterruptControl, rng::Rng,
     timer::timg::TimerGroup,
-    uart::{Config, DataBits, Parity, StopBits, UartRx},
 };
 use han_config::diagnostics::RateLimit;
 use han_core::{Decoder, Telemetry, discovery};
@@ -56,17 +53,12 @@ async fn main(spawner: Spawner) -> ! {
     let (mqtt_settings, settings_store) =
         settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
 
-    let rx = UartRx::new(
+    let rx = uart_dma::Receiver::new(
         peripherals.UART1,
-        Config::default()
-            .with_baudrate(115_200)
-            .with_data_bits(DataBits::_8)
-            .with_parity(Parity::None)
-            .with_stop_bits(StopBits::_1),
-    )
-    .expect("UART configuration")
-    .with_rx(InputSignal::from(peripherals.GPIO0).with_input_inverter(true))
-    .into_async();
+        peripherals.GPIO0,
+        peripherals.UHCI0,
+        peripherals.DMA_CH0,
+    );
     spawner.spawn(receive(rx).unwrap());
     spawner.spawn(report_diagnostics().unwrap());
 
@@ -100,59 +92,89 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn receive(mut rx: UartRx<'static, Async>) {
+async fn receive(mut rx: uart_dma::Receiver) {
     // Keep the 4 KiB frame buffer out of the task's stack.
     static DECODER: StaticCell<Decoder> = StaticCell::new();
     let decoder = DECODER.init(Decoder::new());
-    let mut bytes = [0; 128];
+    let mut bytes = [0; dma_ring::CHUNK_SIZE];
     let mut uart_logs: [RateLimit; 5] = core::array::from_fn(|_| RateLimit::default());
+    let mut dma_logs = RateLimit::default();
     let mut invalid_logs = RateLimit::default();
+    diagnostics::record(format_args!(
+        "UART DMA active: UHCI0/GDMA0, {} bytes, {} x {} chunks; RX FIFO threshold={}",
+        dma_ring::CAPACITY,
+        dma_ring::CHUNKS,
+        dma_ring::CHUNK_SIZE,
+        uart_dma::FIFO_THRESHOLD
+    ));
     loop {
-        match rx.read_async(&mut bytes).await {
-            Ok(len) => {
-                for &byte in &bytes[..len] {
-                    if let Some(result) = decoder.push(byte) {
-                        let now_ms = Instant::now().as_millis();
-                        match result {
-                            Ok(snapshot) => {
-                                TELEMETRY.lock(|state| state.borrow_mut().update(snapshot, now_ms));
-                                diagnostics::valid_telegram(now_ms);
-                            }
-                            Err(error) => {
-                                TELEMETRY.lock(|state| {
-                                    let mut state = state.borrow_mut();
-                                    state.invalid_frames = state.invalid_frames.saturating_add(1)
-                                });
-                                if invalid_logs.admit(now_ms) {
-                                    diagnostics::record(format_args!(
-                                        "Telegram rejected: {:?}",
-                                        error
-                                    ));
+        // Bound work per poll even if the input is continuous. DMA keeps filling
+        // the ring while parsing and while the executor runs network tasks.
+        for _ in 0..dma_ring::CHUNKS {
+            match rx.read_chunk(&mut bytes) {
+                Ok(None) => break,
+                Ok(Some(len)) => {
+                    diagnostics::dma_received(len);
+                    for &byte in &bytes[..len] {
+                        if let Some(result) = decoder.push(byte) {
+                            let now_ms = Instant::now().as_millis();
+                            match result {
+                                Ok(snapshot) => {
+                                    TELEMETRY
+                                        .lock(|state| state.borrow_mut().update(snapshot, now_ms));
+                                    diagnostics::valid_telegram(now_ms);
+                                }
+                                Err(error) => {
+                                    TELEMETRY.lock(|state| {
+                                        let mut state = state.borrow_mut();
+                                        state.invalid_frames =
+                                            state.invalid_frames.saturating_add(1)
+                                    });
+                                    if invalid_logs.admit(now_ms) {
+                                        diagnostics::record(format_args!(
+                                            "Telegram rejected: {:?}",
+                                            error
+                                        ));
+                                    }
                                 }
                             }
+                            UPDATED.signal(());
                         }
-                        UPDATED.signal(());
                     }
                 }
-            }
-            Err(error) => {
-                decoder.reset();
-                TELEMETRY.lock(|state| {
-                    let mut state = state.borrow_mut();
-                    state.uart_errors = state.uart_errors.saturating_add(1);
-                });
-                // The HAL clears reported error flags; drain any buffered tail before resync.
-                let _ = rx.read_buffered(&mut bytes);
-                let (kind, count) = diagnostics::uart_error(error);
-                if uart_logs[kind].admit(Instant::now().as_millis()) {
-                    diagnostics::record(format_args!(
-                        "UART {:?}; count={}; partial telegram discarded",
-                        error, count
-                    ));
+                Err(error) => {
+                    decoder.reset();
+                    rx.restart();
+                    if let Some(error) = error.uart {
+                        TELEMETRY.lock(|state| {
+                            let mut state = state.borrow_mut();
+                            state.uart_errors = state.uart_errors.saturating_add(1);
+                        });
+                        let (kind, count) = diagnostics::uart_error(error);
+                        if uart_logs[kind].admit(Instant::now().as_millis()) {
+                            diagnostics::record(format_args!(
+                                "UART {:?}; count={}; partial telegram discarded; DMA restarted",
+                                error, count
+                            ));
+                        }
+                    }
+                    if let Some(error) = error.dma {
+                        let count = diagnostics::dma_error(matches!(
+                            error,
+                            uart_dma::DmaError::BufferExhausted
+                        ));
+                        if dma_logs.admit(Instant::now().as_millis()) {
+                            diagnostics::record(format_args!(
+                                "DMA {:?}; count={}; buffered data discarded; reception restarted",
+                                error, count
+                            ));
+                        }
+                    }
+                    break;
                 }
-                Timer::after(Duration::from_millis(1)).await;
             }
         }
+        Timer::after(Duration::from_millis(5)).await;
     }
 }
 
