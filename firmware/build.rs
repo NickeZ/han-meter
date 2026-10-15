@@ -65,18 +65,13 @@ fn main() {
             "A 64-byte Wi-Fi password must be a hexadecimal PSK"
         );
     }
-    check_text("mqtt.host", &config.mqtt.host, 1, 253);
-    assert!(
-        config
-            .mqtt
-            .host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')),
-        "mqtt.host must be an IPv4 address or DNS hostname, without a scheme or port"
-    );
-    assert!(config.mqtt.port != 0, "mqtt.port must be nonzero");
-    check_text("mqtt.username", &config.mqtt.username, 1, 128);
-    check_text("mqtt.password", &config.mqtt.password, 1, 256);
+    han_config::MqttSettings::new(
+        &config.mqtt.host,
+        config.mqtt.port,
+        &config.mqtt.username,
+        &config.mqtt.password,
+    )
+    .unwrap_or_else(|error| panic!("Invalid MQTT configuration: {error}"));
     let mut generated = String::new();
     for (key, value) in [
         ("DEVICE_NAME", &config.device_name),

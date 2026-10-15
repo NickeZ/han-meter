@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/han-core", "crates/han-mqtt", "firmware"]
-default-members = ["crates/han-core", "crates/han-mqtt"]
+members = ["crates/han-core", "crates/han-mqtt", "crates/han-config", "firmware"]
+default-members = ["crates/han-core", "crates/han-mqtt", "crates/han-config"]
 resolver = "3"
 
 [workspace.package]

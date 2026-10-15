@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod network;
+mod settings;
 mod config {
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
 }
@@ -47,6 +48,8 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, interrupts.software_interrupt0);
+    let (mqtt_settings, settings_store) =
+        settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
 
     let rx = UartRx::new(
         peripherals.UART1,
@@ -71,7 +74,7 @@ async fn main(spawner: Spawner) -> ! {
     dhcp.hostname = Some(hostname.as_str().try_into().expect("DHCP hostname length"));
     let rng = Rng::new();
     let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
-    static RESOURCES: StaticCell<embassy_net::StackResources<3>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         interfaces.station,
         embassy_net::Config::dhcpv4(dhcp),
@@ -80,13 +83,15 @@ async fn main(spawner: Spawner) -> ! {
     );
     spawner.spawn(network::runner(runner).unwrap());
     spawner.spawn(network::wifi(controller).unwrap());
+    spawner.spawn(settings::http(stack, mqtt_settings, settings_store, hostname.clone()).unwrap());
+    spawner.spawn(settings::address_log(stack).unwrap());
     println!(
         "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
         env!("CARGO_PKG_VERSION"),
         id,
         hostname
     );
-    network::run(stack, &id).await
+    network::run(stack, &id, mqtt_settings).await
 }
 
 #[embassy_executor::task]

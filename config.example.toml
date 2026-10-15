@@ -6,6 +6,8 @@ ssid = "CHANGE_ME"
 password = "CHANGE_ME"
 
 [mqtt]
+# Initial defaults. Saved settings from http://<device-ip>/ override these,
+# including after reflashing. Leave the browser password empty to keep it.
 # IPv4 address or DNS hostname; .local/mDNS is not supported.
 host = "mqtt.example.net"
 port = 1883

@@ -20,11 +20,11 @@ cargo install espflash --version 4.5.0 --locked
 cp config.example.toml config.toml
 ```
 
-Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and MQTT broker details. The first version supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname or IPv4 address; `.local` mDNS resolution is not implemented.
+Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and initial MQTT broker details. The firmware supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname or IPv4 address; `.local` mDNS resolution is not implemented.
 
 The firmware sends a DHCP hostname of `han-` followed by the station MAC address as twelve lowercase hexadecimal digits (for example, `han-aabbccddeeff`). The USB startup log shows the name. Routers that display DHCP hostnames can use it in their client list; a cached entry may take time to refresh after reflashing. `device_name` controls the Home Assistant display name. DHCP hostname advertisement does not provide a `.local` mDNS name.
 
-`config.toml` is ignored by Git. Configuration is compiled into the firmware, so changing it requires rebuilding and flashing. Firmware binaries and generated build files also contain those settings. Credentials are never printed in logs or configuration parse errors.
+`config.toml` is ignored by Git. Wi-Fi credentials, the device name, and MQTT defaults are compiled into the firmware. Change Wi-Fi credentials or the device name by rebuilding and flashing; MQTT settings can also be changed through the browser after the initial flash. Firmware binaries and generated build files contain the compiled settings. Credentials are never printed in logs or configuration parse errors.
 
 ```sh
 cargo firmware
@@ -48,6 +48,36 @@ HAN_CONFIG=config.example.toml cargo firmware
 ```
 
 This produces a build for verification, with placeholder settings. Build again using your real `config.toml` before flashing. `HAN_CONFIG` can also point to an alternative configuration; relative paths are resolved from the repository root. A missing or invalid configuration fails the firmware build. Host tests do not require a configuration file.
+
+## Change MQTT settings over Wi-Fi
+
+After the device joins Wi-Fi, open `http://<device-ip>/` in a browser on the same network. The USB log prints the URL when DHCP assigns an address; you can also find the device in the router's client list using its `han-<MAC>` hostname. The hostname can be used in the browser if your router resolves it. Use the IP address or that advertised hostname; arbitrary DNS aliases and `.local` names are not supported.
+
+Edit the broker host, port, username, and optional new password, then select **Save and reconnect**. The password is never returned to the browser. Leave its field empty to keep the current password. Username/password authentication remains required. Host, username, and password limits are 253, 128, and 256 UTF-8 bytes respectively; control characters are rejected. The port must be 1–65535.
+
+The page shows MQTT connection status and refreshes it every five seconds without overwriting edits. Saving persists the settings before reconnecting MQTT, without rebooting or clearing the latest meter readings. It also interrupts an ongoing connection attempt or retry delay. Incorrect credentials or an unreachable broker remain saved, and the page stays available so you can correct them. The old broker's Last Will marks the previous connection offline; discovery and fresh readings are published on the new connection.
+
+The page uses plain HTTP without a login, intended for a trusted local network. Devices on that network can view the broker address/username and change the settings. Credentials travel over HTTP when replaced. Browser writes must originate from the device's page; the API grants no CORS access.
+
+Saved settings override the compiled MQTT defaults, including after ordinary reflashing. The firmware uses its own checksummed, two-sector journal in the first 8 KiB of the existing `nvs` data partition; it does not use the ESP-IDF NVS format or change the partition layout. Unchanged saves do not write flash. An interrupted update preserves the previous committed record, and blank or corrupt records fall back to the firmware defaults. If the partition is missing, overlaps other data, contains an unsupported format, or cannot be read safely, the firmware uses defaults and disables saving. A flash-write failure keeps the current runtime settings active and disables further writes until restart.
+
+To clear saved MQTT settings or reclaim `nvs` from a previous firmware, erase that data partition over USB and restart:
+
+```sh
+espflash erase-parts --chip esp32c3 --port /dev/ttyACM0 nvs
+```
+
+This erases the entire `nvs` partition. On this firmware it restores the compiled MQTT defaults; Wi-Fi credentials and the application remain in the firmware image. Changing MQTT defaults in `config.toml` alone does not replace a saved override.
+
+The browser uses these local HTTP endpoints:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /` | Embedded settings page; no external assets or internet connection needed |
+| `GET /api/mqtt` | `host`, `port`, `username`, `password_set`, `status`, `last_error`, and `storage_available`; never the password |
+| `POST /api/mqtt` | JSON containing `host`, `port`, `username`, and optional `password`; omitted, null, or empty password preserves the current one |
+
+API writes require `Content-Type: application/json`, `Content-Length`, and `X-Han-Settings: 1`. Bodies are limited to 4096 bytes, and unknown fields are rejected. A successful response reports `saved`, `changed`, and `message`; saved settings do not imply a successful broker connection. Settings responses are not cached, and the server bounds requests with five-second read/write timeouts.
 
 ## Home Assistant
 
@@ -95,18 +125,19 @@ The workspace separates portable behavior from the board:
 
 - `crates/han-core`: bounded streaming decoder, CRC-16/ARC, exact decimal parsing, OBIS mapping, latest-value cache, and discovery JSON.
 - `crates/han-mqtt`: the transport-independent MQTT session used by both firmware and broker integration tests.
-- `firmware`: GPIO/UART, native USB diagnostics, Wi-Fi/DHCP/DNS/TCP, and build-time configuration.
+- `crates/han-config`: bounded settings and shared validation, persistent journal, change notifications, and HTTP handlers.
+- `firmware`: GPIO/UART, native USB diagnostics, Wi-Fi/DHCP/DNS/TCP, flash and HTTP tasks, and build-time defaults.
 
 ```sh
 cargo test --locked
-cargo clippy --locked -p han-core -p han-mqtt --all-targets -- -D warnings
+cargo clippy --locked -p han-core -p han-mqtt -p han-config --all-targets -- -D warnings
 HAN_CONFIG=config.example.toml cargo clippy --locked --release \
   -p han-firmware --target riscv32imc-unknown-none-elf -- -D warnings
 cargo fmt --all -- --check
 bash scripts/test-mqtt.sh
 ```
 
-The broker test requires Docker. It starts an isolated Mosquitto container with test credentials on an ephemeral localhost port and removes the container afterward. It exercises the production MQTT session with an independent MQTT observer: discovery, retention, exact values, stale fields, periodic diagnostics with and without meter data, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, and rejected authentication. Unit tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, counter resets, and diagnostic metadata/telegram age.
+The broker tests require Docker. They start two isolated Mosquitto containers with test credentials on ephemeral localhost ports and remove them afterward. They exercise the production MQTT session with independent MQTT observers: discovery, retention, exact values, stale fields, periodic diagnostics with and without meter data, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, rejected authentication, live broker/credential changes, and corrections during retry backoff. The host tests also cover malformed/fragmented HTTP requests, password preservation, storage errors, settings validation, revision notifications, and simulated power cuts throughout flash erase/write/verification. Protocol tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, counter resets, and diagnostic metadata/telegram age.
 
 ## Hardware acceptance
 
@@ -117,6 +148,8 @@ The software tests do not replace these checks on the actual meter and board:
 3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility. Verify its two diagnostic sensors update every minute and the telegram age increases when P1 input stops while MQTT stays connected.
 4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes.
 5. Run for 24 hours using P1 power, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability.
+6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
+7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.
 
 If no telegrams arrive, check meter activation and the data-request line. If invalid frames or UART errors rise, check signal inversion, the pull-up/interface wiring, baud rate, and that the meter is using the ASCII profile. Failure to connect to Wi-Fi or MQTT does not stop reception.
 

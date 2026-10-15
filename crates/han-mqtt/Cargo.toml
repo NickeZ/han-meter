@@ -12,6 +12,8 @@ rust-mqtt = { version = "=0.6.0", default-features = false, features = ["v5", "a
 heapless = "=0.9.1"
 
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
+han-config = { path = "../han-config", default-features = false }
+embassy-sync = "=0.8.0"
 embassy-time = { version = "=0.5.1", features = ["std", "generic-queue-64"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "sync", "io-util"] }
 embedded-io-adapters = { version = "0.7", features = ["tokio-1"] }

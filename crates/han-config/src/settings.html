@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAN meter · MQTT settings</title>
+<style>
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { max-width: 32rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5; }
+h1 { font-size: 1.8rem; margin-bottom: .25rem; }
+p { margin: .5rem 0 1.5rem; }
+label { display: block; margin-top: 1rem; font-weight: 600; }
+input, button { box-sizing: border-box; width: 100%; padding: .75rem; font: inherit; border-radius: .35rem; border: 1px solid #888; }
+input { margin-top: .35rem; }
+button { margin-top: 1.5rem; background: #176342; color: white; cursor: pointer; }
+button:disabled { opacity: .6; cursor: wait; }
+small { display: block; margin-top: .35rem; opacity: .8; }
+#status { padding: .75rem; border: 1px solid #888; border-radius: .35rem; }
+#message { margin-top: 1rem; }
+</style>
+<h1>MQTT settings</h1>
+<p>HAN meter</p>
+<p id="status" role="status">Loading connection status…</p>
+<form id="settings">
+<fieldset id="fields" disabled style="border:0;padding:0;margin:0">
+<label for="host">Broker host</label>
+<input id="host" name="host" required maxlength="253" placeholder="mqtt.example.net" autocapitalize="none" spellcheck="false">
+<small>IPv4 address or DNS hostname, without a scheme or port. .local names are not supported.</small>
+<label for="port">Port</label>
+<input id="port" name="port" type="number" required min="1" max="65535" value="1883">
+<label for="username">Username</label>
+<input id="username" name="username" required maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false">
+<label for="password">New password</label>
+<input id="password" name="password" type="password" maxlength="256" autocomplete="new-password">
+<small>Leave empty to keep the saved password.</small>
+<button id="save" type="submit">Save and reconnect</button>
+</fieldset>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<small>Settings are saved on the meter and survive power cycles. Access is open to your local network.</small>
+<script>
+const element = id => document.getElementById(id);
+let loaded = false;
+let saving = false;
+const states = {waiting_for_wifi: 'Waiting for Wi-Fi', connecting: 'Connecting to MQTT…', connected: 'MQTT connected', disconnected: 'MQTT disconnected'};
+async function refresh() {
+  if (saving) return;
+  try {
+    const response = await fetch('/api/mqtt', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+    if (!response.ok) throw new Error('Could not read settings.');
+    const data = await response.json();
+    element('status').textContent = (states[data.status] || data.status) + (data.last_error ? ' — ' + data.last_error : '');
+    if (!loaded) {
+      for (const key of ['host', 'port', 'username']) element(key).value = data[key];
+      loaded = true;
+    }
+    element('fields').disabled = !data.storage_available;
+    if (!data.storage_available && !element('message').textContent) element('message').textContent = 'Configuration storage is unavailable. Check the USB log and flash layout.';
+  } catch (_) {
+    element('status').textContent = 'Device unreachable. Reconnecting…';
+  }
+}
+element('settings').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (saving) return;
+  saving = true;
+  element('save').disabled = true;
+  element('message').textContent = 'Saving…';
+  const body = {host: element('host').value, port: Number(element('port').value), username: element('username').value};
+  if (element('password').value) body.password = element('password').value;
+  try {
+    const response = await fetch('/api/mqtt', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Han-Settings': '1'},
+      body: JSON.stringify(body), signal: AbortSignal.timeout(10000)
+    });
+    if (!(response.headers.get('content-type') || '').includes('application/json')) throw new Error(await response.text());
+    const result = await response.json();
+    element('message').textContent = result.message;
+    if (response.ok && result.saved) element('password').value = '';
+  } catch (error) {
+    element('message').textContent = 'Save could not be confirmed. Check the settings before retrying. ' + error.message;
+  } finally {
+    saving = false;
+    element('save').disabled = false;
+    await refresh();
+  }
+});
+(async function poll() { await refresh(); setTimeout(poll, 5000); })();
+</script>
+</html>

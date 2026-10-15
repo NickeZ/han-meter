@@ -13,6 +13,10 @@ bench = false
 [dependencies]
 han-core = { path = "../crates/han-core" }
 han-mqtt = { path = "../crates/han-mqtt" }
+han-config = { path = "../crates/han-config" }
+esp-storage = { version = "=0.9.0", features = ["esp32c3"] }
+embedded-storage = "0.3.1"
+picoserve = { version = "=0.19.0", default-features = false, features = ["embassy", "json"] }
 esp-hal = { version = "=1.1.2", features = ["esp32c3", "unstable"] }
 esp-rtos = { version = "=0.3.0", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
 esp-radio = { version = "=0.18.0", features = ["esp32c3", "wifi", "unstable"] }
@@ -27,5 +31,6 @@ embassy-sync = "=0.8.0"
 static_cell = "=2.1.1"
 
 [build-dependencies]
+han-config = { path = "../crates/han-config", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

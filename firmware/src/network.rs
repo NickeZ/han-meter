@@ -1,8 +1,10 @@
+use crate::settings::SettingsControl;
 use crate::{UPDATED, config, telemetry};
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
 use esp_radio::wifi::{Config, Interface, PowerSaveMode, WifiController, sta::StationConfig};
+use han_config::{MqttSettings, control::Status};
 use han_core::Backoff;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,11 +56,54 @@ pub(crate) async fn wifi(mut controller: WifiController<'static>) {
     }
 }
 
-pub(crate) async fn run(stack: Stack<'static>, id: &str) -> ! {
+pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static SettingsControl) -> ! {
     let mut retry = Backoff::new();
     loop {
-        stack.wait_config_up().await;
-        if let Err(error) = session(stack, id, &mut retry).await {
+        let state = control.snapshot();
+        let revision = state.revision;
+        if !stack.is_config_up() {
+            control.set_status(revision, Status::WaitingForWifi, None);
+        }
+        let mut rx = [0; 2048];
+        let mut tx = [0; 2048];
+        let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+        socket.set_timeout(Some(Duration::from_secs(15)));
+        let outcome = control
+            .until_changed(revision, async {
+                stack.wait_config_up().await;
+                control.set_status(revision, Status::Connecting, None);
+                session(
+                    stack,
+                    id,
+                    &mut retry,
+                    &mut socket,
+                    &state.settings,
+                    control,
+                    revision,
+                )
+                .await
+            })
+            .await;
+        // The socket lives outside the cancelled future. Flush its RST before
+        // removal so the old broker can publish the retained offline Last Will.
+        socket.abort();
+        let _ = with_timeout(IO_TIMEOUT, socket.flush()).await;
+        drop(socket);
+        let result = match outcome {
+            None => {
+                retry.reset();
+                continue;
+            }
+            Some(result) => result,
+        };
+        if let Err(error) = result {
+            let message = match error {
+                Error::Dns => "Broker hostname could not be resolved.",
+                Error::Tcp => "Could not connect to the broker.",
+                Error::Timeout => "Broker connection timed out.",
+                Error::Mqtt(_) => "MQTT connection failed. Check the broker and credentials.",
+            };
+            control.set_status(revision, Status::Disconnected, Some(message));
             match error {
                 Error::Mqtt(reason) => println!("MQTT session ended: {:?}", reason),
                 _ => println!("MQTT connection failed: {:?}", error),
@@ -66,35 +111,45 @@ pub(crate) async fn run(stack: Stack<'static>, id: &str) -> ! {
         }
         let delay = retry.next_seconds();
         println!("MQTT retry in {}s", delay);
-        Timer::after(Duration::from_secs(delay)).await;
+        if control
+            .until_changed(revision, Timer::after(Duration::from_secs(delay)))
+            .await
+            .is_none()
+        {
+            retry.reset();
+        }
     }
 }
 
-async fn session(stack: Stack<'_>, id: &str, retry: &mut Backoff) -> Result<(), Error> {
+async fn session(
+    stack: Stack<'_>,
+    id: &str,
+    retry: &mut Backoff,
+    socket: &mut TcpSocket<'_>,
+    settings: &MqttSettings,
+    control: &SettingsControl,
+    revision: u64,
+) -> Result<(), Error> {
     let addresses = with_timeout(
         Duration::from_secs(10),
-        stack.dns_query(config::MQTT_HOST, DnsQueryType::A),
+        stack.dns_query(&settings.host, DnsQueryType::A),
     )
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Dns)?;
     let address = *addresses.first().ok_or(Error::Dns)?;
-    let mut rx = [0; 2048];
-    let mut tx = [0; 2048];
-    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
-    socket.set_timeout(Some(Duration::from_secs(15)));
-    with_timeout(IO_TIMEOUT, socket.connect((address, config::MQTT_PORT)))
+    with_timeout(IO_TIMEOUT, socket.connect((address, settings.port)))
         .await
         .map_err(|_| Error::Timeout)?
         .map_err(|_| Error::Tcp)?;
 
-    let application = FirmwareApplication;
+    let application = FirmwareApplication { control, revision };
     let config = han_mqtt::Config {
         id,
         device_name: config::DEVICE_NAME,
         version: env!("CARGO_PKG_VERSION"),
-        username: config::MQTT_USERNAME,
-        password: config::MQTT_PASSWORD,
+        username: &settings.username,
+        password: &settings.password,
     };
     let started = Instant::now();
     let result = han_mqtt::run(socket, &config, &application).await;
@@ -104,8 +159,11 @@ async fn session(stack: Stack<'_>, id: &str, retry: &mut Backoff) -> Result<(), 
     result.map_err(Error::Mqtt)
 }
 
-struct FirmwareApplication;
-impl han_mqtt::Application for FirmwareApplication {
+struct FirmwareApplication<'a> {
+    control: &'a SettingsControl,
+    revision: u64,
+}
+impl han_mqtt::Application for FirmwareApplication<'_> {
     fn snapshot(&self) -> han_core::Telemetry {
         telemetry()
     }
@@ -113,6 +171,8 @@ impl han_mqtt::Application for FirmwareApplication {
         UPDATED.wait().await
     }
     fn connected(&self) {
+        self.control
+            .set_status(self.revision, Status::Connected, None);
         println!("MQTT connected");
     }
 }

@@ -1,6 +1,11 @@
 //! Exercises the production MQTT session against an isolated Mosquitto broker.
 //! The observer is an independent, minimal MQTT 3.1.1 wire client.
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embedded_io_adapters::tokio_1::FromTokio;
+use han_config::{
+    MqttSettings,
+    control::{Control, Status},
+};
 use han_core::{Decimal, Snapshot, Telemetry, Value, discovery, discovery::Diagnostic};
 use std::{
     cell::{Cell, RefCell},
@@ -358,4 +363,151 @@ async fn launch(address: &str, id: &str, app: App) -> tokio::task::JoinHandle<()
         let result = han_mqtt::run(socket, &config, &app).await;
         panic!("device session unexpectedly ended: {result:?}");
     })
+}
+
+struct ConfigurableApp {
+    app: App,
+    control: Rc<Control<NoopRawMutex>>,
+    revision: u64,
+}
+impl han_mqtt::Application for ConfigurableApp {
+    fn snapshot(&self) -> Telemetry {
+        *self.app.telemetry.borrow()
+    }
+    async fn changed(&self) {
+        self.app.notify.notified().await
+    }
+    fn now_ms(&self) -> u64 {
+        self.app.now.get()
+    }
+    fn connected(&self) {
+        self.control
+            .set_status(self.revision, Status::Connected, None);
+    }
+}
+
+fn broker_settings(address: &str, username: &str, password: &str) -> MqttSettings {
+    let address: std::net::SocketAddr = address.parse().unwrap();
+    MqttSettings::new(
+        &address.ip().to_string(),
+        address.port(),
+        username,
+        password,
+    )
+    .unwrap()
+}
+
+/// Exercises the same cancellation boundary as the firmware with real TCP/MQTT.
+/// Tokio closes the socket on drop; Embassy's explicit abort/flush is checked on hardware.
+async fn configurable_device(id: String, control: Rc<Control<NoopRawMutex>>, app: App) {
+    loop {
+        let state = control.snapshot();
+        let revision = state.revision;
+        control.set_status(revision, Status::Connecting, None);
+        let result = control
+            .until_changed(revision, async {
+                let socket =
+                    TcpStream::connect((state.settings.host.as_str(), state.settings.port))
+                        .await
+                        .map_err(|_| ())?;
+                let config = han_mqtt::Config {
+                    id: &id,
+                    device_name: "Configurable meter",
+                    version: "test",
+                    username: &state.settings.username,
+                    password: &state.settings.password,
+                };
+                han_mqtt::run(
+                    FromTokio::new(socket),
+                    &config,
+                    &ConfigurableApp {
+                        app: app.clone(),
+                        control: control.clone(),
+                        revision,
+                    },
+                )
+                .await
+                .map_err(|_| ())
+            })
+            .await;
+        if result.is_some() {
+            control.set_status(revision, Status::Disconnected, Some("Connection failed"));
+            // A saved correction must interrupt even the maximum retry delay.
+            control
+                .until_changed(revision, tokio::time::sleep(Duration::from_secs(60)))
+                .await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires two isolated brokers; run scripts/test-mqtt.sh"]
+async fn live_settings_switch_brokers_and_recover_from_rejected_credentials() {
+    LocalSet::new()
+        .run_until(async {
+            let first = std::env::var("HAN_TEST_BROKER").unwrap();
+            let second = std::env::var("HAN_TEST_BROKER_SECOND").unwrap();
+            let id = discovery::device_id([0x02, 0, 0, 0, 0, 2]);
+            let availability = discovery::availability_topic(&id).unwrap();
+            let power = discovery::Topics::new(&id, &han_core::FIELDS[4]).unwrap();
+            let mut observer1 =
+                Observer::connect(&first, "config-observer-1", &["han_meter/#"]).await;
+            let mut observer2 = Observer::connect(
+                &second,
+                "config-observer-2",
+                &["han_meter/#", "homeassistant/sensor/+/config"],
+            )
+            .await;
+            let control = Rc::new(Control::<NoopRawMutex>::new(broker_settings(
+                &first,
+                "han-test",
+                "test-password",
+            )));
+            let app = App::new();
+            app.update(None, "1.234");
+            let device = tokio::task::spawn_local(configurable_device(
+                id.to_string(),
+                control.clone(),
+                app.clone(),
+            ));
+            observer1
+                .until(|m| contains(m, &availability, "online"))
+                .await;
+            assert_eq!(control.snapshot().status, Status::Connected);
+
+            // Change broker/port and credentials while actively publishing.
+            control.apply(broker_settings(&second, "han-updated", "new-password"));
+            observer1
+                .until(|m| contains(m, &availability, "offline"))
+                .await;
+            let messages = observer2
+                .until(|m| contains(m, &availability, "online"))
+                .await;
+            assert!(contains(&messages, &power.state, "1.234"));
+            assert!(messages.iter().any(|m| m.topic == power.discovery.as_str()));
+
+            control.apply(broker_settings(&second, "han-updated", "wrong-password"));
+            observer2
+                .until(|m| contains(m, &availability, "offline"))
+                .await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while control.snapshot().status != Status::Disconnected {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            // Corrections coalesce to the newest settings and bypass the 60-second backoff.
+            control.apply(broker_settings(&first, "han-test", "test-password"));
+            control.apply(broker_settings(&second, "han-updated", "new-password"));
+            app.update(None, "2.345");
+            let messages = observer2
+                .until(|m| contains(m, &availability, "online"))
+                .await;
+            assert!(contains(&messages, &power.state, "2.345"));
+            assert_eq!(control.snapshot().status, Status::Connected);
+            device.abort();
+            let _ = device.await;
+        })
+        .await;
 }

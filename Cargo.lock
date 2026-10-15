@@ -105,6 +105,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b396d1f76d455557e1218ec8066ae14bba60b4b36ecd55577ba979f5db7ecaa"
 
 [[package]]
+name = "const-sha1"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8a42181e0652c2997ae4d217f25b63c5337a52fd2279736e97b832fa0a3cff"
+
+[[package]]
 name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,6 +902,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-storage"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf2b3f00c9f94b27c62a4f5296b19470c3a083c687c8146e554a459f9bee596"
+dependencies = [
+ "document-features",
+ "embedded-storage",
+ "esp-hal",
+ "esp-hal-procmacros",
+ "esp-metadata-generated",
+ "esp-rom-sys",
+ "esp-sync",
+]
+
+[[package]]
 name = "esp-sync"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1062,6 +1083,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "han-config"
+version = "0.1.0"
+dependencies = [
+ "embassy-futures",
+ "embassy-sync 0.8.0",
+ "embedded-storage",
+ "heapless 0.9.1",
+ "picoserve",
+ "serde",
+ "serde-json-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "han-core"
 version = "0.1.0"
 dependencies = [
@@ -1080,6 +1116,7 @@ dependencies = [
  "embassy-net",
  "embassy-sync 0.8.0",
  "embassy-time",
+ "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
@@ -1087,8 +1124,11 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp-storage",
+ "han-config",
  "han-core",
  "han-mqtt",
+ "picoserve",
  "serde",
  "static_cell",
  "toml",
@@ -1099,8 +1139,10 @@ name = "han-mqtt"
 version = "0.1.0"
 dependencies = [
  "embassy-futures",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-io-adapters",
+ "han-config",
  "han-core",
  "heapless 0.9.1",
  "rust-mqtt",
@@ -1141,6 +1183,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1edcd5a338e64688fbdcb7531a846cfd3476a54784dcb918a0844682bc7ada5"
 dependencies = [
  "hash32",
+ "serde",
  "stable_deref_trait",
 ]
 
@@ -1361,6 +1404,57 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "picoserve"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaf10aff74fc2b847b186ae037e91412f5b17a5224ba162a2c1bb41f3f48f86"
+dependencies = [
+ "const-sha1",
+ "embassy-net",
+ "embassy-time",
+ "embedded-io-async 0.7.0",
+ "heapless 0.8.0",
+ "picoserve_derive",
+ "pin-project",
+ "ryu",
+ "serde",
+ "serde-json-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "picoserve_derive"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e18e82b212e47a9df016984abe8da12c179440942c02f57c7badc82f6466a051"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pin-project"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2466b2336ed02bcdca6b294417127b90ec92038d1d5c4fbeac971a922e0e0924"
+dependencies = [
+ "pin-project-internal",
+]
+
+[[package]]
+name = "pin-project-internal"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "pin-project-lite"
