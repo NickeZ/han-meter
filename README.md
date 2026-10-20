@@ -45,7 +45,11 @@ cargo install espflash --version 4.5.0 --locked
 cp config.example.toml config.toml
 ```
 
-Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and initial MQTT broker details. The firmware supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname or IPv4 address; `.local` mDNS resolution is not implemented.
+Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and initial MQTT broker details. The firmware supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname, IPv4 address, or IPv6 address; `.local` mDNS resolution is not implemented. IPv6 literals may be bare (`fd12:3456:789a::10`) or bracketed (`[fd12:3456:789a::10]`). Keep the port in its separate field and omit zone IDs such as `%wlan0`; link-local broker addresses use the device's Wi-Fi interface.
+
+IPv4 uses DHCP and IPv6 uses SLAAC router advertisements, with both enabled together. For hostnames, MQTT tries AAAA records first when IPv6 is configured, then falls back to A records when IPv4 is configured. It tries up to four addresses per family, with a five-second TCP connection timeout per address. An IPv4-only network does not wait for IPv6 configuration.
+
+On an IPv6-only network, use a literal broker address. The pinned network stack does not learn DNS servers from IPv6 router advertisements (RDNSS) or implement DHCPv6; hostname lookup relies on DNS servers supplied by DHCPv4. A global or ULA IPv6 address requires a router advertising a SLAAC prefix. Link-local broker literals also work on the same Wi-Fi link without DHCP or a router.
 
 The firmware sends a DHCP hostname of `han-` followed by the station MAC address as twelve lowercase hexadecimal digits (for example, `han-aabbccddeeff`). The USB startup log shows the name. Routers that display DHCP hostnames can use it in their client list; a cached entry may take time to refresh after reflashing. `device_name` controls the Home Assistant display name. DHCP hostname advertisement does not provide a `.local` mDNS name.
 
@@ -76,7 +80,7 @@ This produces a build for verification, with placeholder settings. Build again u
 
 ## Change MQTT settings over Wi-Fi
 
-After the device joins Wi-Fi, open `http://<device-ip>/` in a browser on the same network. The USB log prints the URL when DHCP assigns an address; you can also find the device in the router's client list using its `han-<MAC>` hostname. The hostname can be used in the browser if your router resolves it. Use the IP address or that advertised hostname; arbitrary DNS aliases and `.local` names are not supported.
+After the device joins Wi-Fi, open `http://<device-ip>/` in a browser on the same network, or `http://[<device-ipv6>]/` for IPv6. The USB log prints URLs when DHCP or SLAAC assigns an address; you can also find the device in the router's client list using its `han-<MAC>` hostname. The hostname can be used in the browser if your router resolves it. Use the IP address or that advertised hostname; arbitrary DNS aliases and `.local` names are not supported.
 
 Edit the broker host, port, username, and optional new password, then select **Save and reconnect**. The password is never returned to the browser. Leave its field empty to keep the current password. Username/password authentication remains required. Host, username, and password limits are 253, 128, and 256 UTF-8 bytes respectively; control characters are rejected. The port must be 1–65535.
 
@@ -172,7 +176,7 @@ The workspace separates portable behavior from the board:
 - `crates/han-core`: bounded streaming decoder, CRC-16/ARC, exact decimal parsing, OBIS mapping, latest-value cache, and discovery JSON.
 - `crates/han-mqtt`: the transport-independent MQTT session used by both firmware and broker integration tests.
 - `crates/han-config`: bounded settings and shared validation, persistent journal, change notifications, and HTTP handlers.
-- `firmware`: GPIO/UART, native USB diagnostics, Wi-Fi/DHCP/DNS/TCP, flash and HTTP tasks, and build-time defaults.
+- `firmware`: GPIO/UART, native USB diagnostics, Wi-Fi/DHCP/SLAAC/DNS/TCP, flash and HTTP tasks, and build-time defaults.
 
 ```sh
 cargo test --locked
@@ -186,9 +190,16 @@ bash scripts/test-mqtt.sh
 
 The broker tests require Docker. They start two isolated Mosquitto containers with test credentials on ephemeral localhost ports and remove them afterward. They exercise the production MQTT session with independent MQTT observers: discovery, retention, exact values, stale fields, periodic diagnostics with and without meter data, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, rejected authentication, live broker/credential changes, and corrections during retry backoff. The host tests also cover malformed/fragmented HTTP requests, password preservation, storage errors, settings validation, revision notifications, and simulated power cuts throughout flash erase/write/verification. Protocol tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, counter resets, and diagnostic metadata/telegram age. DMA ring tests run the firmware's actual buffer code with a simulated producer, covering delayed consumption, ownership, wraparound, short/empty chunks, invalid lengths, reset, and telegram decoding across chunks. They do not emulate the UART/UHCI/GDMA peripherals; hardware acceptance remains necessary.
 
+Host tests also exercise the firmware's broker address selection with simulated DNS/TCP failures: IPv6 preference, IPv4 fallback, multiple answers, literal addresses, and operation with only one configured address family. IPv6 settings validation, journal persistence, and HTTP Host/Origin handling are covered separately. A packet-level SLAAC regression test injects a router advertisement after IPv4 is configured and verifies that both gateways and all three addresses coexist. These tests do not emulate the Wi-Fi network.
+
+`vendor/smoltcp` contains the pinned 0.13.1 source with a one-line fix for SLAAC dropping the IPv6 gateway when an IPv4 route already exists. See [the patch notes](vendor/smoltcp/PATCHES.md) for provenance, the upstream report, and removal criteria.
+
 ## Hardware acceptance
 
 The software tests do not replace these checks on the actual meter and board:
+
+- On a dual-stack LAN, verify both DHCP and SLAAC URLs appear, connect to an IPv6 broker literal and an AAAA-only hostname, and save settings through the IPv6 URL. Check fallback with an unreachable AAAA address and a reachable A address. Repeat on IPv4-only Wi-Fi.
+- Disable DHCPv4 and verify an IPv6 broker literal works using SLAAC. Test a link-local broker literal on the same link without router advertisements, then reconnect Wi-Fi and confirm recovery.
 
 1. Flash with real settings. Confirm the USB startup line reports GPIO0, inversion, 115200 8N1, and the DHCP hostname; verify Wi-Fi and MQTT connection logs and check the router's client list for the hostname. Verify the onboard LED blinks green until Wi-Fi connects, then turns off.
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.

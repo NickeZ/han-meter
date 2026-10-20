@@ -4,6 +4,7 @@ use crate::{
     control::{Snapshot, Status},
 };
 use alloc::boxed::Box;
+use core::net::IpAddr;
 use heapless::String;
 use picoserve::{
     Router,
@@ -16,6 +17,25 @@ use serde::{Deserialize, Serialize};
 
 pub const BODY_LIMIT: usize = 4096;
 pub const HTTP_BUFFER_SIZE: usize = 6144;
+
+/// Match an HTTP authority against the device's own addresses or DHCP hostname.
+/// IPv6 authorities require brackets; only the HTTP port (80) is accepted.
+pub fn host_allowed(
+    host: &str,
+    hostname: &str,
+    addresses: impl IntoIterator<Item = IpAddr>,
+) -> bool {
+    let host = host.strip_suffix(":80").unwrap_or(host);
+    if host.eq_ignore_ascii_case(hostname) {
+        return true;
+    }
+    let address = if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        inner.parse().ok().map(IpAddr::V6)
+    } else {
+        host.parse().ok().map(IpAddr::V4)
+    };
+    address.is_some_and(|address| addresses.into_iter().any(|local| local == address))
+}
 
 pub trait Application {
     fn snapshot(&self) -> Snapshot;

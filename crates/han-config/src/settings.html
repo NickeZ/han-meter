@@ -29,7 +29,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
 <fieldset id="fields" disabled style="border:0;padding:0;margin:0">
 <label for="host">Broker host</label>
 <input id="host" name="host" required maxlength="253" placeholder="mqtt.example.net" autocapitalize="none" spellcheck="false">
-<small>IPv4 address or DNS hostname, without a scheme or port. .local names are not supported.</small>
+<small>IPv4/IPv6 address or DNS hostname, without a scheme, port, or zone ID. IPv6 brackets are optional. .local names are not supported.</small>
 <label for="port">Port</label>
 <input id="port" name="port" type="number" required min="1" max="65535" value="1883">
 <label for="username">Username</label>

@@ -10,7 +10,7 @@ pub mod storage;
 #[cfg(feature = "web")]
 pub mod web;
 
-use core::fmt;
+use core::{fmt, net::IpAddr};
 use heapless::String;
 
 /// Owned MQTT credentials. Deliberately has no Serialize or Debug implementation.
@@ -34,7 +34,7 @@ impl ValidationError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::Host => {
-                "Host must be an IPv4 address or DNS hostname (1–253 bytes), without a scheme or port."
+                "Host must be an IPv4/IPv6 address or DNS hostname (1–253 bytes), without a scheme, port, or zone ID."
             }
             Self::Port => "Port must be between 1 and 65535.",
             Self::Username => "Username must contain 1–128 bytes and no control characters.",
@@ -58,9 +58,10 @@ impl MqttSettings {
     ) -> Result<Self, ValidationError> {
         if host.is_empty()
             || host.len() > 253
-            || !host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+            || (parse_ip_literal(host).is_none()
+                && !host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')))
         {
             return Err(ValidationError::Host);
         }
@@ -86,5 +87,18 @@ impl MqttSettings {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         Self::new(&self.host, self.port, &self.username, &self.password).map(|_| ())
+    }
+
+    /// An IP literal bypasses DNS. IPv6 may have brackets, but no zone ID.
+    pub fn ip_address(&self) -> Option<IpAddr> {
+        parse_ip_literal(&self.host)
+    }
+}
+
+fn parse_ip_literal(host: &str) -> Option<IpAddr> {
+    if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        inner.parse().ok().map(IpAddr::V6)
+    } else {
+        host.parse().ok()
     }
 }

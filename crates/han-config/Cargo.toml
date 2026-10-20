@@ -18,6 +18,8 @@ embassy-futures = "=0.1.2"
 picoserve = { version = "=0.19.0", default-features = false, features = ["json"], optional = true }
 
 [dev-dependencies]
+# Match the firmware's address capacity and exercise real SLAAC packet handling.
+smoltcp = { version = "=0.13.1", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6-slaac", "socket-tcp", "iface-max-addr-count-3", "dns-max-result-count-4"] }
 picoserve = { version = "=0.19.0", features = ["tokio", "json"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "sync", "io-util"] }
 serde_json = "1.0"

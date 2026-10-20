@@ -58,7 +58,14 @@ impl Application for App {
         !self.failing.get()
     }
     fn host_allowed(&self, host: &str) -> bool {
-        matches!(host, "device" | "device:80")
+        web::host_allowed(
+            host,
+            "device",
+            [
+                "192.0.2.2".parse().unwrap(),
+                "2001:db8::80".parse().unwrap(),
+            ],
+        )
     }
     fn save(&self, settings: MqttSettings) -> Result<bool, SaveError> {
         if self.failing.get() {
@@ -120,6 +127,75 @@ fn post(body: &str) -> String {
         "POST /api/mqtt HTTP/1.1\r\nHost: device\r\nOrigin: http://device\r\nX-Han-Settings: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+#[test]
+fn http_authorities_only_accept_local_addresses_and_the_http_port() {
+    let allowed = |host| {
+        web::host_allowed(
+            host,
+            "device",
+            [
+                "192.0.2.2".parse().unwrap(),
+                "2001:db8::80".parse().unwrap(),
+            ],
+        )
+    };
+    for host in [
+        "device",
+        "DEVICE:80",
+        "192.0.2.2:80",
+        "[2001:db8::80]",
+        "[2001:db8::80]:80",
+        "[2001:0db8:0:0:0:0:0:80]",
+    ] {
+        assert!(allowed(host), "{host}");
+    }
+    for host in [
+        "evil.example",
+        "192.0.2.3",
+        "[2001:db8::81]",
+        "2001:db8::80",
+        "[2001:db8::80]:8080",
+        "[2001:db8::80",
+        "[192.0.2.2]",
+        "[2001:db8::80%wlan0]",
+        "device:80:80",
+    ] {
+        assert!(!allowed(host), "{host}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ipv6_authorities_and_broker_settings_work_with_origin_checks() {
+    let app = App::new();
+    let request = post(r#"{"host":"[fd12:3456:789a::10]","port":1883,"username":"meter"}"#)
+        .replace("Host: device", "Host: [2001:db8::80]:80")
+        .replace("Origin: http://device", "Origin: http://[2001:db8::80]");
+    let response = exchange(&app, &request).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(
+        app.snapshot().settings.ip_address(),
+        Some("fd12:3456:789a::10".parse().unwrap())
+    );
+    assert_eq!(app.snapshot().settings.password, "secret");
+    let response = exchange(
+        &app,
+        "GET /api/mqtt HTTP/1.1\r\nHost: [2001:db8::80]\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("[fd12:3456:789a::10]"));
+    let response = exchange(
+        &app,
+        &request.replace(
+            "Origin: http://[2001:db8::80]",
+            "Origin: http://[2001:db8::81]",
+        ),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert_eq!(app.writes.get(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

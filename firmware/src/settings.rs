@@ -175,13 +175,19 @@ impl web::Application for HttpApplication {
     }
 
     fn host_allowed(&self, host: &str) -> bool {
-        let host = host.strip_suffix(":80").unwrap_or(host);
-        if host.eq_ignore_ascii_case(&self.hostname) {
-            return true;
-        }
-        self.stack.config_v4().is_some_and(|config| {
-            host.parse::<embassy_net::Ipv4Address>().ok() == Some(config.address.address())
-        })
+        let v4 = self.stack.config_v4().map(|c| c.address.address().into());
+        let v6 = self.stack.config_v6().map(|c| c.address.address().into());
+        // The SLAAC stack always installs this address, even without a router.
+        let link_local = embassy_net::Ipv6Cidr::from_link_prefix(
+            &embassy_net::Ipv6Cidr::new(embassy_net::Ipv6Cidr::LINK_LOCAL_PREFIX.address(), 64),
+            self.stack.hardware_address(),
+        )
+        .map(|c| c.address().into());
+        web::host_allowed(
+            host,
+            &self.hostname,
+            [v4, v6, link_local].into_iter().flatten(),
+        )
     }
 }
 
@@ -217,6 +223,7 @@ pub(crate) async fn http(
 #[embassy_executor::task]
 pub(crate) async fn address_log(stack: Stack<'static>) {
     let mut previous = None;
+    let mut previous_v6 = None;
     loop {
         let address = stack.config_v4().map(|config| config.address.address());
         if address != previous {
@@ -224,6 +231,13 @@ pub(crate) async fn address_log(stack: Stack<'static>) {
                 log!("MQTT settings page: http://{}/", address);
             }
             previous = address;
+        }
+        let address_v6 = stack.config_v6().map(|config| config.address.address());
+        if address_v6 != previous_v6 {
+            if let Some(address) = address_v6 {
+                log!("MQTT settings page: http://[{}]/", address);
+            }
+            previous_v6 = address_v6;
         }
         Timer::after(Duration::from_secs(1)).await;
     }

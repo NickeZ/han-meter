@@ -1,7 +1,12 @@
 [workspace]
 members = ["crates/han-core", "crates/han-mqtt", "crates/han-config", "firmware"]
 default-members = ["crates/han-core", "crates/han-mqtt", "crates/han-config"]
+exclude = ["vendor/smoltcp"]
 resolver = "3"
+
+[patch.crates-io]
+# Backport the dual-stack SLAAC route fix; see vendor/smoltcp/PATCHES.md.
+smoltcp = { path = "vendor/smoltcp" }
 
 [workspace.package]
 version = "0.1.0"

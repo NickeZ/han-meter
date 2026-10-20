@@ -57,6 +57,45 @@ fn validation_bounds_and_errors_do_not_contain_values() {
 }
 
 #[test]
+fn ipv6_literals_are_validated_and_parsed_without_dns_or_zone_ids() {
+    for (host, address) in [
+        ("192.0.2.10", "192.0.2.10"),
+        ("2001:db8::10", "2001:db8::10"),
+        ("[2001:db8::10]", "2001:db8::10"),
+        ("fd12:3456:789a::80", "fd12:3456:789a::80"),
+        ("fe80::1234", "fe80::1234"),
+        ("::ffff:192.0.2.10", "::ffff:192.0.2.10"),
+    ] {
+        let settings = MqttSettings::new(host, 1883, "u", "p").unwrap();
+        assert_eq!(settings.ip_address(), Some(address.parse().unwrap()));
+        assert_eq!(settings.host, host);
+    }
+    assert_eq!(settings().ip_address(), None);
+    for host in [
+        "2001:db8:::10",
+        "2001:db8::gg",
+        "[2001:db8::10]:1883",
+        "[2001:db8::10",
+        "2001:db8::10]",
+        "[]",
+        "[broker]",
+        "[192.0.2.10]",
+        "fe80::10%wlan0",
+        "[fe80::10%25wlan0]",
+        "mqtt://[2001:db8::10]",
+        " 2001:db8::10",
+    ] {
+        assert!(
+            matches!(
+                MqttSettings::new(host, 1883, "u", "p"),
+                Err(ValidationError::Host)
+            ),
+            "{host}"
+        );
+    }
+}
+
+#[test]
 fn json_keeps_password_and_handles_escaped_credentials() {
     let previous = settings();
     for suffix in ["", ",\"password\":null", ",\"password\":\"\""] {

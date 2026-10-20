@@ -91,6 +91,17 @@ fn settings(port: u16) -> MqttSettings {
 }
 
 #[test]
+fn ipv6_broker_settings_survive_reopening_the_existing_journal_format() {
+    let mut store = Store::open(Flash::new(), 4096).unwrap();
+    for host in ["fd12:3456:789a::10", "[2001:db8::80]", "fe80::1234"] {
+        let settings = MqttSettings::new(host, 1883, "meter", "secret").unwrap();
+        assert!(store.save(&settings).unwrap());
+        store = Store::open(store.into_inner(), 4096).unwrap();
+        assert!(store.load() == Some(&settings));
+    }
+}
+
+#[test]
 fn persists_and_skips_unchanged_writes_without_touching_other_sectors() {
     let mut store = Store::open(Flash::new(), 4096).unwrap();
     assert!(store.load().is_none());

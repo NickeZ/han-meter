@@ -8,7 +8,9 @@ password = "CHANGE_ME"
 [mqtt]
 # Initial defaults. Saved settings from http://<device-ip>/ override these,
 # including after reflashing. Leave the browser password empty to keep it.
-# IPv4 address or DNS hostname; .local/mDNS is not supported.
+# IPv4/IPv6 address or DNS hostname; .local/mDNS is not supported.
+# IPv6 examples: "fd12:3456:789a::10" or "[fd12:3456:789a::10]"; no zone ID.
+# On IPv6-only networks use an address: DNS servers are learned via DHCPv4.
 host = "mqtt.example.net"
 port = 1883
 username = "han-meter"

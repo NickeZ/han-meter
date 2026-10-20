@@ -1,6 +1,8 @@
+use crate::broker::{self, Family};
 use crate::diagnostics::log;
 use crate::settings::SettingsControl;
 use crate::{UPDATED, config, status_led, telemetry};
+use core::net::IpAddr;
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_radio::wifi::{Config, Interface, PowerSaveMode, WifiController, sta::StationConfig};
@@ -10,9 +12,7 @@ use han_core::Backoff;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 enum Error {
-    Dns,
-    Tcp,
-    Timeout,
+    Connect(broker::Error),
     Mqtt(han_mqtt::Error),
 }
 #[embassy_executor::task]
@@ -72,7 +72,12 @@ pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static Setti
         socket.set_timeout(Some(Duration::from_secs(15)));
         let outcome = control
             .until_changed(revision, async {
-                stack.wait_config_up().await;
+                stack.wait_link_up().await;
+                // SLAAC installs a link-local address without a router or DHCP.
+                // All other destinations require an acquired IP configuration.
+                if !matches!(state.settings.ip_address(), Some(IpAddr::V6(ip)) if ip.is_unicast_link_local()) {
+                    stack.wait_config_up().await;
+                }
                 control.set_status(revision, Status::Connecting, None);
                 session(
                     stack,
@@ -100,9 +105,9 @@ pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static Setti
         };
         if let Err(error) = result {
             let message = match error {
-                Error::Dns => "Broker hostname could not be resolved.",
-                Error::Tcp => "Could not connect to the broker.",
-                Error::Timeout => "Broker connection timed out.",
+                Error::Connect(broker::Error::Dns) => "Broker hostname could not be resolved.",
+                Error::Connect(broker::Error::Tcp) => "Could not connect to the broker.",
+                Error::Connect(broker::Error::Timeout) => "Broker connection timed out.",
                 Error::Mqtt(_) => "MQTT connection failed. Check the broker and credentials.",
             };
             control.set_status(revision, Status::Disconnected, Some(message));
@@ -123,27 +128,18 @@ pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static Setti
     }
 }
 
-async fn session(
-    stack: Stack<'_>,
+async fn session<'s>(
+    stack: Stack<'s>,
     id: &str,
     retry: &mut Backoff,
-    socket: &mut TcpSocket<'_>,
+    socket: &mut TcpSocket<'s>,
     settings: &MqttSettings,
     control: &SettingsControl,
     revision: u64,
 ) -> Result<(), Error> {
-    let addresses = with_timeout(
-        Duration::from_secs(10),
-        stack.dns_query(&settings.host, DnsQueryType::A),
-    )
-    .await
-    .map_err(|_| Error::Timeout)?
-    .map_err(|_| Error::Dns)?;
-    let address = *addresses.first().ok_or(Error::Dns)?;
-    with_timeout(IO_TIMEOUT, socket.connect((address, settings.port)))
+    broker::connect(&mut BrokerTransport { stack, socket }, settings)
         .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::Tcp)?;
+        .map_err(Error::Connect)?;
 
     let application = FirmwareApplication { control, revision };
     let config = han_mqtt::Config {
@@ -159,6 +155,54 @@ async fn session(
         retry.reset();
     }
     result.map_err(Error::Mqtt)
+}
+
+struct BrokerTransport<'a, 's> {
+    stack: Stack<'s>,
+    socket: &'a mut TcpSocket<'s>,
+}
+
+impl broker::Transport for BrokerTransport<'_, '_> {
+    fn configured(&self, family: Family) -> bool {
+        match family {
+            Family::Ipv6 => self.stack.config_v6().is_some(),
+            Family::Ipv4 => self.stack.config_v4().is_some(),
+        }
+    }
+
+    async fn resolve(
+        &mut self,
+        host: &str,
+        family: Family,
+    ) -> Result<heapless::Vec<IpAddr, 4>, broker::Error> {
+        let query = match family {
+            Family::Ipv6 => DnsQueryType::Aaaa,
+            Family::Ipv4 => DnsQueryType::A,
+        };
+        let addresses = with_timeout(Duration::from_secs(10), self.stack.dns_query(host, query))
+            .await
+            .map_err(|_| broker::Error::Timeout)?
+            .map_err(|_| broker::Error::Dns)?;
+        Ok(addresses.into_iter().map(Into::into).collect())
+    }
+
+    async fn connect(&mut self, address: IpAddr, port: u16) -> Result<(), broker::Error> {
+        let result = with_timeout(
+            IO_TIMEOUT,
+            self.socket
+                .connect((embassy_net::IpAddress::from(address), port)),
+        )
+        .await
+        .map_err(|_| broker::Error::Timeout)
+        .and_then(|result| result.map_err(|_| broker::Error::Tcp));
+        if result.is_err() {
+            // In particular, a timed-out SYN must not leave the socket in use
+            // when the next IPv6 or IPv4 address is attempted.
+            self.socket.abort();
+            let _ = with_timeout(IO_TIMEOUT, self.socket.flush()).await;
+        }
+        result
+    }
 }
 
 struct FirmwareApplication<'a> {

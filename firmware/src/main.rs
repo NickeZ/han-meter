@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod broker;
 mod diagnostics;
 mod dma_ring;
 mod network;
@@ -69,12 +70,14 @@ async fn main(spawner: Spawner) -> ! {
     let hostname = id.replace('_', "-");
     let mut dhcp = embassy_net::DhcpConfig::default();
     dhcp.hostname = Some(hostname.as_str().try_into().expect("DHCP hostname length"));
+    let mut net_config = embassy_net::Config::dhcpv4(dhcp);
+    net_config.ipv6 = embassy_net::ConfigV6::Slaac;
     let rng = Rng::new();
     let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
     static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         interfaces.station,
-        embassy_net::Config::dhcpv4(dhcp),
+        net_config,
         RESOURCES.init(embassy_net::StackResources::new()),
         seed,
     );
