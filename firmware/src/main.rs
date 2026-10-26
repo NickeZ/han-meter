@@ -24,10 +24,7 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
-use esp_hal::{
-    clock::CpuClock, interrupt::software::SoftwareInterruptControl, rng::Rng,
-    timer::timg::TimerGroup,
-};
+use esp_hal::{clock::CpuClock, rng::Rng, timer::timg::TimerGroup};
 use han_config::diagnostics::RateLimit;
 use han_core::{Decoder, Telemetry, discovery};
 use static_cell::StaticCell;
@@ -47,8 +44,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
     esp_alloc::heap_allocator!(size: 96 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, interrupts.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
     diagnostics::initialize(Rng::new().random());
     spawner.spawn(status_led::run(peripherals.RMT, peripherals.GPIO10).unwrap());
     let (mqtt_settings, settings_store) =
@@ -63,9 +59,10 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(receive(rx).unwrap());
     spawner.spawn(report_diagnostics().unwrap());
 
-    let (controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("Wi-Fi initialization");
-    let id = discovery::device_id(interfaces.station.mac_address());
+    let controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
+        .expect("Wi-Fi initialization");
+    let station = esp_radio::wifi::Interface::station();
+    let id = discovery::device_id(station.mac_address());
     // DHCP hostnames use hyphens; keep the MQTT/Home Assistant identifier unchanged.
     let hostname = id.replace('_', "-");
     let mut dhcp = embassy_net::DhcpConfig::default();
@@ -76,7 +73,7 @@ async fn main(spawner: Spawner) -> ! {
     let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
     static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
-        interfaces.station,
+        station,
         net_config,
         RESOURCES.init(embassy_net::StackResources::new()),
         seed,

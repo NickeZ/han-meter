@@ -14,16 +14,17 @@ bench = false
 han-core = { path = "../crates/han-core" }
 han-mqtt = { path = "../crates/han-mqtt" }
 han-config = { path = "../crates/han-config" }
-esp-storage = { version = "=0.9.0", features = ["esp32c3"] }
+esp-storage = { version = "=0.10.0", features = ["esp32c3", "embedded-storage"] }
 embedded-storage = "0.3.1"
 picoserve = { version = "=0.19.0", default-features = false, features = ["embassy", "json"] }
-esp-hal = { version = "=1.1.2", features = ["esp32c3", "unstable"] }
-esp-rtos = { version = "=0.3.0", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
-esp-radio = { version = "=0.18.0", features = ["esp32c3", "wifi", "unstable"] }
-esp-alloc = { version = "=0.10.0", features = ["esp32c3"] }
-esp-bootloader-esp-idf = { version = "=0.5.0", features = ["esp32c3"] }
-esp-println = { version = "=0.17.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
-esp-backtrace = { version = "=0.19.0", features = ["esp32c3", "panic-handler", "println"] }
+esp-hal = { version = "=1.2.2", features = ["esp32c3", "unstable"] }
+# These releases include the RISC-V idle scheduler and Wi-Fi cancellation fixes.
+esp-rtos = { version = "=0.4.0", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32c3", "wifi", "unstable"] }
+esp-alloc = { version = "=0.11.0", features = ["esp32c3"] }
+esp-bootloader-esp-idf = { version = "=0.6.0", features = ["esp32c3"] }
+esp-println = { version = "=0.18.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+esp-backtrace = { version = "=0.20.0", features = ["esp32c3", "panic-handler", "println"] }
 embassy-executor = "=0.10.0"
 embassy-net = { version = "=0.9.1", features = ["tcp", "udp", "dhcpv4-hostname", "dns", "medium-ethernet", "slaac"] }
 # IPv4, SLAAC, and IPv6 link-local must coexist; retain multiple DNS answers.

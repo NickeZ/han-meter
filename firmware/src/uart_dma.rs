@@ -7,7 +7,7 @@ use core::{
 };
 use esp_hal::{
     Blocking,
-    dma::{DmaDescriptor, DmaRxBuffer, Preparation, TransferDirection},
+    dma::{DmaDescriptor, DmaRxBuffer, Preparation},
     gpio::interconnect::InputSignal,
     peripherals::{DMA, DMA_CH0, GPIO0, UART1, UHCI0},
     uart::{
@@ -47,7 +47,6 @@ unsafe impl DmaRxBuffer for Buffer {
             // SAFETY: initial startup or restart after Receiver::restart has
             // confirmed the DMA channel is parked. No active view exists.
             start: unsafe { self.0.prepare() }.cast(),
-            direction: TransferDirection::In,
             burst_transfer: Default::default(),
             check_owner: Some(true),
             auto_write_back: true,

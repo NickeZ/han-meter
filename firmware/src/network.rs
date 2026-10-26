@@ -5,7 +5,10 @@ use crate::{UPDATED, config, status_led, telemetry};
 use core::net::IpAddr;
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_radio::wifi::{Config, Interface, PowerSaveMode, WifiController, sta::StationConfig};
+use esp_radio::wifi::{
+    AuthenticationMethodConfig, Config, Interface, PowerSaveMode, WifiController, WifiError,
+    sta::StationConfig,
+};
 use han_config::{MqttSettings, control::Status};
 use han_core::Backoff;
 
@@ -16,7 +19,7 @@ enum Error {
     Mqtt(han_mqtt::Error),
 }
 #[embassy_executor::task]
-pub(crate) async fn runner(mut runner: embassy_net::Runner<'static, Interface<'static>>) {
+pub(crate) async fn runner(mut runner: embassy_net::Runner<'static, Interface>) {
     runner.run().await;
 }
 
@@ -24,38 +27,59 @@ pub(crate) async fn runner(mut runner: embassy_net::Runner<'static, Interface<'s
 pub(crate) async fn wifi(mut controller: WifiController<'static>) {
     let config = Config::Station(
         StationConfig::default()
-            .with_ssid(config::WIFI_SSID)
-            .with_password(config::WIFI_PASSWORD.into()),
+            .with_ssid(config::WIFI_SSID.try_into().expect("validated Wi-Fi SSID"))
+            .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
+                config::WIFI_PASSWORD
+                    .try_into()
+                    .expect("validated Wi-Fi password"),
+            )),
     );
     let mut retry = Backoff::new();
+    // Configure only once. A reconnect must not reconfigure a driver that may
+    // still be completing a cancelled connection or disconnection.
     loop {
-        if let Err(error) = controller.set_config(&config) {
-            log!("Wi-Fi configuration failed: {:?}", error);
-        } else {
-            // Modem sleep reduces average P1 power demand; CPU/UART stay awake.
-            let _ = controller.set_power_saving(PowerSaveMode::Minimum);
-            match with_timeout(Duration::from_secs(30), controller.connect_async()).await {
-                Ok(Ok(_)) => {
-                    status_led::set_wifi_connected(true);
-                    log!("Wi-Fi connected");
-                    let connected_at = Instant::now();
-                    let _ = controller.wait_for_disconnect_async().await;
-                    status_led::set_wifi_connected(false);
-                    if connected_at.elapsed() >= Duration::from_secs(60) {
-                        retry.reset();
-                    }
-                    log!("Wi-Fi disconnected");
-                }
-                _ => {
-                    log!("Wi-Fi connection failed");
-                    let _ = with_timeout(IO_TIMEOUT, controller.disconnect_async()).await;
-                }
-            }
+        match controller.set_config(&config) {
+            Ok(()) => break,
+            Err(error) => log!("Wi-Fi configuration failed: {:?}", error),
         }
-        let delay = retry.next_seconds();
-        log!("Wi-Fi retry in {}s", delay);
-        Timer::after(Duration::from_secs(delay)).await;
+        wifi_retry(&mut retry).await;
     }
+    retry.reset();
+    // Modem sleep reduces average P1 power demand; CPU/UART stay awake.
+    let _ = controller.set_power_saving(PowerSaveMode::Minimum);
+    loop {
+        match with_timeout(Duration::from_secs(30), controller.connect_async()).await {
+            Ok(Ok(_)) => {
+                status_led::set_wifi_connected(true);
+                log!("Wi-Fi connected");
+                let connected_at = Instant::now();
+                let _ = controller.wait_for_disconnect_async().await;
+                status_led::set_wifi_connected(false);
+                if connected_at.elapsed() >= Duration::from_secs(60) {
+                    retry.reset();
+                }
+                log!("Wi-Fi disconnected");
+                wifi_retry(&mut retry).await;
+                continue;
+            }
+            Ok(Err(error)) => log!("Wi-Fi connection failed: {:?}", error),
+            Err(_) => log!("Wi-Fi connection timed out; cancelling attempt"),
+        }
+        // Dropping connect_async only drops its event subscription. Explicitly
+        // cancel the driver's Connecting or Connected state before retrying.
+        match with_timeout(IO_TIMEOUT, controller.disconnect_async()).await {
+            Ok(Ok(_)) | Ok(Err(WifiError::NotConnected)) => {}
+            Ok(Err(error)) => log!("Wi-Fi cancellation failed: {:?}", error),
+            Err(_) => log!("Wi-Fi cancellation timed out"),
+        }
+        wifi_retry(&mut retry).await;
+    }
+}
+
+async fn wifi_retry(retry: &mut Backoff) {
+    let delay = retry.next_seconds();
+    log!("Wi-Fi retry in {}s", delay);
+    Timer::after(Duration::from_secs(delay)).await;
 }
 
 pub(crate) async fn run(stack: Stack<'static>, id: &str, control: &'static SettingsControl) -> ! {

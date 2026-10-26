@@ -38,7 +38,7 @@ The application runs at 80 MHz and enables minimum Wi-Fi modem sleep. UART recep
 
 ## Configure, build, and flash
 
-Rustup installs the pinned **Rust 1.94.0** toolchain and `riscv32imc-unknown-none-elf` target when running Cargo in this directory. Install the matching flash tool:
+Rustup installs the pinned **Rust 1.95.0** toolchain and `riscv32imc-unknown-none-elf` target when running Cargo in this directory. The ESP dependencies require Rust 1.95 or newer. Install the matching flash tool:
 
 ```sh
 cargo install espflash --version 4.5.0 --locked
@@ -194,6 +194,8 @@ Host tests also exercise the firmware's broker address selection with simulated 
 
 `vendor/smoltcp` contains the pinned 0.13.1 source with a one-line fix for SLAAC dropping the IPv6 gateway when an IPv4 route already exists. See [the patch notes](vendor/smoltcp/PATCHES.md) for provenance, the upstream report, and removal criteria.
 
+The ESP crates are pinned together at compatible releases: `esp-hal` 1.2.2, `esp-rtos` 0.4.0, and `esp-radio` 1.0.0-beta.1. These include fixes for restoring the RISC-V idle context, cancelling a Wi-Fi connection in progress, and returning driver state/timeout errors without panicking. Wi-Fi is configured once; failed or timed-out connection attempts are explicitly disconnected before retrying with backoff.
+
 ## Hardware acceptance
 
 The software tests do not replace these checks on the actual meter and board:
@@ -205,7 +207,7 @@ The software tests do not replace these checks on the actual meter and board:
 2. Confirm the `valid` telegram counter rises and compare all reported readings with the meter. The 60-second diagnostic line also reports uptime, invalid frames, UART errors, and meter freshness.
 3. Confirm Home Assistant creates a single device, with correct units and Energy dashboard eligibility. Verify its two diagnostic sensors update every minute and the telegram age increases when P1 input stops while MQTT stays connected.
 4. Interrupt Wi-Fi, restart the broker and Home Assistant, stop telegram delivery, and power-cycle the board. Verify automatic recovery, stable entity identifiers, unavailable stale readings, and absence of synthetic zeroes. Check that the green blink resumes during Wi-Fi outages and stops after reconnection, including when MQTT is unavailable.
-5. Run for 24 hours using P1 power with the Equalizer connected through the passive splitter, including Wi-Fi reconnects. Check for resets, UART errors, missing readings, and supply instability on both devices.
+5. Run for at least 72 hours using P1 power with the Equalizer connected through the passive splitter, including quiet periods and repeated Wi-Fi outages longer than the 30-second connection timeout. Restore the access point and verify automatic recovery without resets. Check for UART errors, missing readings, and supply instability on both devices.
 6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
 7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.
 8. With USB disconnected and HAN/P1 connected, open the diagnostic log and confirm `UART DMA active`. Verify that DMA bytes and valid telegram counts advance, pause/resume works, and the downloaded text includes the counters and events. Compare UART and DMA error growth with the page open and closed; reconnect the network and restart the device to check log recovery and reset detection. Repeatedly save settings and verify reception resumes after any logged DMA recovery. Unplug/reconnect the meter input and verify that short final chunks and subsequent telegrams are delivered without waiting for another telegram.
