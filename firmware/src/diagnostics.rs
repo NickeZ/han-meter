@@ -2,7 +2,7 @@ use core::{cell::RefCell, fmt};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use esp_hal::uart::RxError;
-use han_config::diagnostics::{DmaStats, Log, Snapshot, UartErrors};
+use han_config::diagnostics::{DmaStats, Log, Page, Snapshot, UartErrors};
 
 static LOG: Log<CriticalSectionRawMutex> = Log::new();
 static RX: Mutex<CriticalSectionRawMutex, RefCell<RxStats>> = Mutex::new(RefCell::new(RxStats {
@@ -42,6 +42,14 @@ pub(crate) fn initialize(boot_id: u32) {
 
 pub(crate) fn record(args: fmt::Arguments<'_>) {
     LOG.record(Instant::now().as_millis(), args);
+}
+
+pub(crate) fn log_page(after: u64) -> Page {
+    LOG.page(after)
+}
+
+pub(crate) fn boot_id() -> u32 {
+    RX.lock(|state| state.borrow().boot_id)
 }
 
 // Mirror existing infrequent USB messages. Receive errors use record() only,

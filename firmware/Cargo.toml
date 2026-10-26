@@ -14,6 +14,10 @@ bench = false
 han-core = { path = "../crates/han-core" }
 han-mqtt = { path = "../crates/han-mqtt" }
 han-config = { path = "../crates/han-config" }
+han-logs = { path = "../crates/han-logs", features = ["tls"] }
+embassy-crypto = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
+# RSA's lazy initialization needs CAS emulation on the ESP32-C3 (RV32IMC).
+spin = { version = "=0.9.9", default-features = false, features = ["portable_atomic"] }
 esp-storage = { version = "=0.10.0", features = ["esp32c3", "embedded-storage"] }
 embedded-storage = "0.3.1"
 picoserve = { version = "=0.19.0", default-features = false, features = ["embassy", "json"] }
@@ -35,6 +39,8 @@ embassy-sync = "=0.8.0"
 static_cell = "=2.1.1"
 
 [build-dependencies]
+base64 = "=0.23.1"
 han-config = { path = "../crates/han-config", default-features = false }
+han-logs = { path = "../crates/han-logs" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

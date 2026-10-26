@@ -27,8 +27,20 @@ pub(crate) async fn connect(
     transport: &mut impl Transport,
     settings: &MqttSettings,
 ) -> Result<(), Error> {
-    if let Some(address) = settings.ip_address() {
-        return transport.connect(address, settings.port).await;
+    connect_to(transport, &settings.host, settings.port).await
+}
+
+pub(crate) async fn connect_to(
+    transport: &mut impl Transport,
+    host: &str,
+    port: u16,
+) -> Result<(), Error> {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = literal.parse() {
+        return transport.connect(address, port).await;
     }
 
     let mut dns_error = Error::Dns;
@@ -39,7 +51,7 @@ pub(crate) async fn connect(
         if !transport.configured(family) {
             continue;
         }
-        let addresses = match transport.resolve(&settings.host, family).await {
+        let addresses = match transport.resolve(host, family).await {
             Ok(addresses) => addresses,
             Err(error) => {
                 dns_error = error;
@@ -47,7 +59,7 @@ pub(crate) async fn connect(
             }
         };
         for address in addresses {
-            match transport.connect(address, settings.port).await {
+            match transport.connect(address, port).await {
                 Ok(()) => return Ok(()),
                 Err(error) => connection_error = Some(error),
             }

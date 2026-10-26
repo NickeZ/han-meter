@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use std::{env, fs, path::PathBuf};
 
@@ -7,6 +8,19 @@ struct Config {
     device_name: String,
     wifi: Wifi,
     mqtt: Mqtt,
+    victorialogs: Option<VictoriaLogs>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VictoriaLogs {
+    url: String,
+    username: String,
+    password: String,
+    #[serde(default = "default_ntp")]
+    ntp_server: String,
+}
+fn default_ntp() -> String {
+    "pool.ntp.org".into()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +107,47 @@ fn main() {
         "pub const MQTT_PORT: u16 = {};\n",
         config.mqtt.port
     ));
+    if let Some(logs) = config.victorialogs {
+        let endpoint = han_logs::Endpoint::parse(&logs.url)
+            .unwrap_or_else(|_| panic!("victorialogs.url must be an HTTPS URL with an ingest path and no embedded credentials"));
+        assert!(
+            endpoint.host().len() <= 64,
+            "victorialogs.url hostname must be at most 64 bytes for embedded-tls verification"
+        );
+        let authorization = han_logs::basic_auth(&logs.username, &logs.password)
+            .unwrap_or_else(|_| panic!("Invalid VictoriaLogs credentials: username 1..=128 bytes without colon, password 1..=256 bytes; no control characters"));
+        let ntp_url = format!("https://{}/", logs.ntp_server);
+        let ntp = han_logs::Endpoint::parse(&ntp_url).unwrap_or_else(|_| {
+            panic!(
+                "victorialogs.ntp_server must be a DNS hostname or IP address (brackets for IPv6)"
+            )
+        });
+        assert!(
+            ntp.path() == "/"
+                && (ntp.authority() == ntp.host()
+                    || ntp.authority() == format!("[{}]", ntp.host())),
+            "Invalid victorialogs.ntp_server"
+        );
+        let roots = [
+            include_str!("certs/isrg-root-x1.pem"),
+            include_str!("certs/isrg-root-x2.pem"),
+        ]
+        .map(|pem| {
+            let base64: String = pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            STANDARD.decode(base64).expect("bundled ISRG root PEM")
+        });
+        println!("cargo:rerun-if-changed=certs/isrg-root-x1.pem");
+        println!("cargo:rerun-if-changed=certs/isrg-root-x2.pem");
+        generated.push_str(&format!(
+            "pub const LOGGING: Option<crate::log_shipping::Config> = Some(crate::log_shipping::Config {{ url: {:?}, authorization: {:?}, ca_roots: &[&{:?}, &{:?}], ntp_server: {:?} }});\n",
+            logs.url, authorization.as_str(), roots[0], roots[1], ntp.host()
+        ));
+    } else {
+        generated.push_str("pub const LOGGING: Option<crate::log_shipping::Config> = None;\n");
+    }
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("config.rs"),
         generated,

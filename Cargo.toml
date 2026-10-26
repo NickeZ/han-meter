@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/han-core", "crates/han-mqtt", "crates/han-config", "firmware"]
-default-members = ["crates/han-core", "crates/han-mqtt", "crates/han-config"]
+members = ["crates/han-core", "crates/han-mqtt", "crates/han-config", "crates/han-logs", "firmware"]
+default-members = ["crates/han-core", "crates/han-mqtt", "crates/han-config", "crates/han-logs"]
 exclude = ["vendor/smoltcp"]
 resolver = "3"
 

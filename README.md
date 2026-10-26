@@ -45,6 +45,8 @@ cargo install espflash --version 4.5.0 --locked
 cp config.example.toml config.toml
 ```
 
+The HTTPS client uses Rust-native `embedded-tls` and RustCrypto. Cargo fetches pinned Git revisions of `embedded-tls` and its Embassy crypto drivers; no C TLS toolchain is required.
+
 Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and initial MQTT broker details. The firmware supports WPA2 personal Wi-Fi and MQTT 5 over plain TCP with username/password authentication. The default MQTT port is 1883. Use a DNS hostname, IPv4 address, or IPv6 address; `.local` mDNS resolution is not implemented. IPv6 literals may be bare (`fd12:3456:789a::10`) or bracketed (`[fd12:3456:789a::10]`). Keep the port in its separate field and omit zone IDs such as `%wlan0`; link-local broker addresses use the device's Wi-Fi interface.
 
 IPv4 uses DHCP and IPv6 uses SLAAC router advertisements, with both enabled together. For hostnames, MQTT tries AAAA records first when IPv6 is configured, then falls back to A records when IPv4 is configured. It tries up to four addresses per family, with a five-second TCP connection timeout per address. An IPv4-only network does not wait for IPv6 configuration.
@@ -129,6 +131,32 @@ The diagnostic API uses the same local Host checks as the settings API, returns 
 
 The settings and diagnostic JSON responses use bounded heap allocations to keep large values out of nested HTTP futures. HTTP tests enforce a future-size budget, and the firmware linker requires at least 80 KiB of main stack headroom. These checks catch memory growth that a successful host HTTP test alone would miss.
 
+## Send logs to VictoriaLogs
+
+Add this optional table to `config.toml`, then rebuild and flash:
+
+```toml
+[victorialogs]
+url = "https://logs.example.net/insert/jsonline"
+username = "han-meter"
+password = "CHANGE_ME"
+# ntp_server = "pool.ntp.org"
+```
+
+Use the complete [VictoriaLogs JSON stream ingest URL](https://docs.victoriametrics.com/victorialogs/data-ingestion/#json-stream-api), including any reverse-proxy prefix or tenant query parameters. The firmware posts newline-delimited JSON with `Content-Type: application/stream+json` and HTTP Basic authentication. Credentials are compiled into the image, like Wi-Fi credentials; they are not exposed through the settings page. Omitting the table disables delivery. Changing these settings requires rebuilding and flashing.
+
+HTTPS certificate verification is mandatory: the firmware checks the hostname, certificate chain, and validity dates before sending credentials. The included [Let's Encrypt ISRG Root X1 and X2 certificates](firmware/certs/README.md) support ordinary certificate renewals without reflashing. The server must send its intermediate certificates and support TLS 1.3 with AES-128-GCM/SHA-256 and P-256 or P-384 key exchange. RSA and ECDSA certificates are supported, including Let's Encrypt's P-384/SHA-384 intermediates. The upstream verifier limits hostnames to 64 bytes and our leaf-certificate buffer holds 4096 DER bytes. Self-signed certificates, unrelated CAs, plain HTTP, TLS 1.2-only servers, and redirects are rejected.
+
+The TLS dependency is pinned to upstream `main` revision [`6487c62`](https://github.com/embassy-rs/embedded-tls/commit/6487c62bb084c33361822022e21836ddfd48388f), which includes WebPKI chain verification unavailable in the published 0.19.0 adapter. Our wrapper tries both roots and refuses missing time, including if time becomes unavailable during the handshake; it never enables upstream's optional date-check bypass. TLS records and certificate storage use reusable heap buffers with fallible startup allocation. Software cryptography still performs synchronous work, so handshake latency and UART/DMA reception need validation on the board.
+
+The device synchronizes its clock over SNTP before uploading and refreshes it every six hours. Permit UDP port 123 to `ntp_server`, or set a reachable local NTP hostname or IP address (bracket IPv6 literals). Uploads wait while synchronization fails. SNTP is unauthenticated; use a trusted network/time server. DNS has the same DHCPv4 dependency described above for MQTT.
+
+Every retained application diagnostic event is exported, including events recorded only in RAM to avoid blocking UART reception. Each line contains `_msg`, `_time` (Unix milliseconds), `device` (the DHCP hostname), `boot_id`, `firmware`, `sequence`, and `uptime_ms`. VictoriaLogs groups streams by `device`. Timestamps are estimated from the first clock synchronization and monotonic uptime; `boot_id` and `sequence` identify events within a boot.
+
+The uploader checks for new events every five seconds and drains a backlog in batches of up to four. It retains each batch until a successful HTTP response, retrying failures with delays from 1 to 60 seconds and a fresh TLS connection. An acknowledgement lost after ingestion can produce duplicates with the same event identifiers. Network operations have timeouts and upload errors are logged only when entering or recovering from a failure.
+
+Delivery uses the existing 64-event RAM log and its 160-byte message limit and rate limits. Older entries can be overwritten during an outage; `lost_entries` on the next batch reports the gap. Pending logs disappear at reset, and bootloader output and panic backtraces are not captured. Logs are never written to flash. This preserves useful history remotely while the device runs, but cannot guarantee delivery of the final event before a crash.
+
 ## Home Assistant
 
 Enable the MQTT integration and discovery in Home Assistant, using the same MQTT 5 broker. The firmware discovers two diagnostic sensors on connection and adds supported meter readings once a valid telegram arrives, all under one device. The device identifier is `han_` followed by the station MAC address as twelve lowercase hexadecimal digits. Renaming the device does not change entity identifiers.
@@ -176,11 +204,14 @@ The workspace separates portable behavior from the board:
 - `crates/han-core`: bounded streaming decoder, CRC-16/ARC, exact decimal parsing, OBIS mapping, latest-value cache, and discovery JSON.
 - `crates/han-mqtt`: the transport-independent MQTT session used by both firmware and broker integration tests.
 - `crates/han-config`: bounded settings and shared validation, persistent journal, change notifications, and HTTP handlers.
+- `crates/han-logs`: bounded JSON Lines batches, HTTPS/Basic-auth validation, HTTP upload, and SNTP response validation.
 - `firmware`: GPIO/UART, native USB diagnostics, Wi-Fi/DHCP/SLAAC/DNS/TCP, flash and HTTP tasks, and build-time defaults.
 
 ```sh
 cargo test --locked
-cargo clippy --locked -p han-core -p han-mqtt -p han-config --all-targets -- -D warnings
+cargo test --locked -p han-logs --features tls
+cargo clippy --locked -p han-core -p han-mqtt -p han-config -p han-logs \
+  --features han-logs/tls --all-targets -- -D warnings
 HAN_CONFIG=config.example.toml cargo clippy --locked --release \
   -p han-firmware --target riscv32imc-unknown-none-elf -- -D warnings
 cargo fmt --all -- --check
@@ -189,6 +220,8 @@ bash scripts/test-mqtt.sh
 ```
 
 The broker tests require Docker. They start two isolated Mosquitto containers with test credentials on ephemeral localhost ports and remove them afterward. They exercise the production MQTT session with independent MQTT observers: discovery, retention, exact values, stale fields, periodic diagnostics with and without meter data, Home Assistant startup, dropped sessions and Last Will, reconnect, empty-cache reboot, rejected authentication, live broker/credential changes, and corrections during retry backoff. The host tests also cover malformed/fragmented HTTP requests, password preservation, storage errors, settings validation, revision notifications, and simulated power cuts throughout flash erase/write/verification. Protocol tests cover malformed and fragmented input, CRC failures, resynchronization, oversized telegrams, invalid dates/units/numbers, missing fields, counter resets, and diagnostic metadata/telegram age. DMA ring tests run the firmware's actual buffer code with a simulated producer, covering delayed consumption, ownership, wraparound, short/empty chunks, invalid lengths, reset, and telegram decoding across chunks. They do not emulate the UART/UHCI/GDMA peripherals; hardware acceptance remains necessary.
+
+The HTTPS integration test requires Node.js and OpenSSL. It generates a temporary CA/intermediate and RSA/ECDSA server certificates, starts an independent local HTTPS server, and checks real TLS 1.3, Basic authentication, certificate/date/hostname rejection, missing intermediates, trust-root fallback, clock loss during verification, HTTP errors, redirects, and cancellation/reconnection. Protocol tests cover JSON escaping, bounded batches, overwritten events, fragmented HTTP, and SNTP validation/era rollover. No test uses production credentials or contacts a production log endpoint.
 
 Host tests also exercise the firmware's broker address selection with simulated DNS/TCP failures: IPv6 preference, IPv4 fallback, multiple answers, literal addresses, and operation with only one configured address family. IPv6 settings validation, journal persistence, and HTTP Host/Origin handling are covered separately. A packet-level SLAAC regression test injects a router advertisement after IPv4 is configured and verifies that both gateways and all three addresses coexist. These tests do not emulate the Wi-Fi network.
 
@@ -211,6 +244,7 @@ The software tests do not replace these checks on the actual meter and board:
 6. Open the settings page, change broker/port/credentials, and verify that the old broker becomes offline and the new broker receives discovery and readings. Save an incorrect password, correct it during retry backoff, and confirm recovery without a reboot. Interrupt Wi-Fi and verify that the page returns when it reconnects.
 7. Power-cycle after saving and after an interrupted save; verify that the previous or new complete settings are loaded. Reflash normally and confirm the override survives. Check UART diagnostics during repeated saves: synchronous flash operations can briefly delay UART servicing, so verify that reception recovers and valid telegrams continue.
 8. With USB disconnected and HAN/P1 connected, open the diagnostic log and confirm `UART DMA active`. Verify that DMA bytes and valid telegram counts advance, pause/resume works, and the downloaded text includes the counters and events. Compare UART and DMA error growth with the page open and closed; reconnect the network and restart the device to check log recovery and reset detection. Repeatedly save settings and verify reception resumes after any logged DMA recovery. Unplug/reconnect the meter input and verify that short final chunks and subsequent telegrams are delivered without waiting for another telegram.
+9. With VictoriaLogs enabled, verify startup and reconnect events arrive with the correct device, time, and boot ID. Interrupt HTTPS/NTP access, return 401/429/503 responses, and restore service; check recovery and reported log gaps. Exercise uploads together with MQTT reconnects and the settings page during the 72-hour run, checking for resets, UART/DMA overruns, and missing telegrams. Host tests cannot establish ESP32 heap headroom or handshake latency on the actual certificate chain.
 
 If no telegrams arrive, check meter activation, splitter/cable continuity, and that the Equalizer is connected and powered so it supplies the data-request signal and RX pull-up. If invalid frames or UART errors rise, check signal inversion, the pull-up/interface wiring and voltage, common ground, baud rate, and that the meter is using the ASCII profile. Failure to connect to Wi-Fi or MQTT does not stop reception.
 

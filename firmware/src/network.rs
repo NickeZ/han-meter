@@ -186,6 +186,15 @@ struct BrokerTransport<'a, 's> {
     socket: &'a mut TcpSocket<'s>,
 }
 
+pub(crate) async fn connect_tcp<'s>(
+    stack: Stack<'s>,
+    socket: &mut TcpSocket<'s>,
+    host: &str,
+    port: u16,
+) -> Result<(), broker::Error> {
+    broker::connect_to(&mut BrokerTransport { stack, socket }, host, port).await
+}
+
 impl broker::Transport for BrokerTransport<'_, '_> {
     fn configured(&self, family: Family) -> bool {
         match family {

@@ -7,6 +7,7 @@ extern crate alloc;
 mod broker;
 mod diagnostics;
 mod dma_ring;
+mod log_shipping;
 mod network;
 mod settings;
 mod status_led;
@@ -71,7 +72,8 @@ async fn main(spawner: Spawner) -> ! {
     net_config.ipv6 = embassy_net::ConfigV6::Slaac;
     let rng = Rng::new();
     let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
-    static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
+    // DHCP, DNS, HTTP, MQTT, log upload, and SNTP can coexist.
+    static RESOURCES: StaticCell<embassy_net::StackResources<6>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         station,
         net_config,
@@ -82,6 +84,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(network::wifi(controller).unwrap());
     spawner.spawn(settings::http(stack, mqtt_settings, settings_store, hostname.clone()).unwrap());
     spawner.spawn(settings::address_log(stack).unwrap());
+    if let Some(config) = config::LOGGING {
+        spawner.spawn(log_shipping::run(stack, config, hostname.clone()).unwrap());
+    }
     log!(
         "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
         env!("CARGO_PKG_VERSION"),
