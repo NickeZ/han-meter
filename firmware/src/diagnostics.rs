@@ -62,6 +62,18 @@ macro_rules! log {
 }
 pub(crate) use log;
 
+pub(crate) fn log_heap(stage: &str) {
+    // Snapshot before logging: formatting must not run under the allocator lock.
+    let heap = esp_alloc::HEAP.stats();
+    log!(
+        "Heap {}: free={}B min_free={}B total={}B",
+        stage,
+        heap.size - heap.current_usage,
+        heap.size - heap.max_usage,
+        heap.size
+    );
+}
+
 pub(crate) fn valid_telegram(now_ms: u64) {
     let interval = RX.lock(|state| {
         let mut state = state.borrow_mut();

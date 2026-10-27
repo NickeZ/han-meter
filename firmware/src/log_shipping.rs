@@ -120,6 +120,7 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
     let mut last_sync = None;
     let mut boot_unix_ms = None;
     log!("VictoriaLogs HTTPS export enabled");
+    diagnostics::log_heap("log buffers allocated");
     loop {
         stack.wait_config_up().await;
         if !refresh_clock(stack, config.ntp_server, &mut last_sync, &mut boot_unix_ms).await {

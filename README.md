@@ -34,7 +34,7 @@ The board's power input, GPIO voltage, and pin labels are documented in the [Wav
 
 The onboard WS2812 RGB LED connects to **GPIO10** and uses [RGB byte order](https://docs.waveshare.com/ESP32-C3-Zero/FAQ). It blinks dim green (500 ms on, 500 ms off) while Wi-Fi is disconnected, turns off when the device joins the access point, and resumes blinking after a disconnect. An asynchronous RMT task drives the LED independently of meter reception and MQTT.
 
-The application runs at 80 MHz and enables minimum Wi-Fi modem sleep. UART reception stays active during network failures. The application uses `no_std`, `esp-hal`, Embassy/`esp-rtos`, `esp-radio`, and `embassy-net`; the ESP-IDF bootloader format is used without the ESP-IDF application runtime. Wi-Fi and MQTT use a fixed 96 KiB allocator arena. Telegram parsing does not allocate.
+The application runs at 80 MHz and enables minimum Wi-Fi modem sleep. UART reception stays active during network failures. The application uses `no_std`, `esp-hal`, Embassy/`esp-rtos`, `esp-radio`, and `embassy-net`; the ESP-IDF bootloader format is used without the ESP-IDF application runtime. Wi-Fi, MQTT, HTTP, and TLS share a 160 KiB heap: 96 KiB in the main RAM region plus 64 KiB reclaimed from the finished ESP-IDF bootloader. The extra region does not reduce the main stack reserve. Telegram parsing does not allocate.
 
 ## Configure, build, and flash
 
@@ -130,6 +130,8 @@ The device retains its latest 64 events with messages limited to 160 bytes, over
 The diagnostic API uses the same local Host checks as the settings API, returns `Cache-Control: no-store`, and includes a `boot_id`, millisecond timestamps, counters, and a `log` object. Use `log.next_after` as the next cursor; `log.more` indicates another page and `log.lost` indicates overwritten events. Reset the cursor when `boot_id` changes. Log formatting and serialization run outside the log's critical sections, and HTTP snapshots copy one bounded entry at a time.
 
 The settings and diagnostic JSON responses use bounded heap allocations to keep large values out of nested HTTP futures. HTTP tests enforce a future-size budget, and the firmware linker requires at least 80 KiB of main stack headroom. These checks catch memory growth that a successful host HTTP test alone would miss.
+
+Heap diagnostics are logged at startup, after Wi-Fi initialization, after allocating remote-log buffers, and every minute. `free` is the current free heap and `min_free` is the lowest estimated free heap since boot, both in bytes. These include transient allocation peaks such as TLS certificate verification; total free bytes do not guarantee a contiguous block of that size.
 
 ## Send logs to VictoriaLogs
 

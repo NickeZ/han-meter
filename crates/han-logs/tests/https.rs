@@ -141,7 +141,8 @@ async fn verified_https_auth_statuses_cancellation_and_certificate_failures() {
             "req",
             "-x509",
             "-newkey",
-            "rsa:2048",
+            // Exercise the RSA-4096 verification used by ISRG Root X1.
+            "rsa:4096",
             "-nodes",
             "-keyout",
             "ca.key",

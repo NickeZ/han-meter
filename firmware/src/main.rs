@@ -44,9 +44,13 @@ pub(crate) fn telemetry() -> Telemetry {
 async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
     esp_alloc::heap_allocator!(size: 96 * 1024);
+    // The ESP-IDF bootloader has finished using this separate RAM region.
+    // TLS shares the heap with Wi-Fi/MQTT; grow it without taking main-stack RAM.
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
     diagnostics::initialize(Rng::new().random());
+    diagnostics::log_heap("startup");
     spawner.spawn(status_led::run(peripherals.RMT, peripherals.GPIO10).unwrap());
     let (mqtt_settings, settings_store) =
         settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
@@ -62,6 +66,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
         .expect("Wi-Fi initialization");
+    diagnostics::log_heap("Wi-Fi initialized");
     let station = esp_radio::wifi::Interface::station();
     let id = discovery::device_id(station.mac_address());
     // DHCP hostnames use hyphens; keep the MQTT/Home Assistant identifier unchanged.
@@ -196,5 +201,6 @@ async fn report_diagnostics() {
             state.uart_errors,
             state.online(Instant::now().as_millis())
         );
+        diagnostics::log_heap("periodic");
     }
 }

@@ -25,7 +25,7 @@ esp-hal = { version = "=1.2.2", features = ["esp32c3", "unstable"] }
 # These releases include the RISC-V idle scheduler and Wi-Fi cancellation fixes.
 esp-rtos = { version = "=0.4.0", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
 esp-radio = { version = "=1.0.0-beta.1", features = ["esp32c3", "wifi", "unstable"] }
-esp-alloc = { version = "=0.11.0", features = ["esp32c3"] }
+esp-alloc = { version = "=0.11.0", features = ["esp32c3", "internal-heap-stats"] }
 esp-bootloader-esp-idf = { version = "=0.6.0", features = ["esp32c3"] }
 esp-println = { version = "=0.18.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
 esp-backtrace = { version = "=0.20.0", features = ["esp32c3", "panic-handler", "println"] }
