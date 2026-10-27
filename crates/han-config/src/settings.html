@@ -16,7 +16,7 @@ button:disabled { opacity: .6; cursor: wait; }
 small { display: block; margin-top: .35rem; opacity: .8; }
 #status { padding: .75rem; border: 1px solid #888; border-radius: .35rem; }
 #message { margin-top: 1rem; }
-#diagnostics { margin-top: 3rem; border-top: 1px solid #888; padding-top: 1rem; }
+#diagnostics, #maintenance { margin-top: 3rem; border-top: 1px solid #888; padding-top: 1rem; }
 .actions { display: flex; gap: .75rem; }
 .actions button { width: auto; margin-top: .5rem; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
@@ -54,17 +54,25 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
 <pre id="log" tabindex="0" aria-label="Diagnostic events">Waiting for events…</pre>
 <small>Times are since boot. The device keeps its latest 64 events in RAM; restarting clears them. This browser keeps up to 256 lines. Repeated UART errors are logged at most once per second per type; DMA errors and rejected telegrams are also rate limited. Counters include every error.</small>
 </section>
+<section id="maintenance" aria-labelledby="maintenance-heading">
+<h2 id="maintenance-heading">Firmware update</h2>
+<p>Enter bootloader mode to flash firmware over a USB data cable. Meter readings, MQTT, and this page stop until the firmware restarts. Power-cycle the device to return without flashing.</p>
+<button id="bootloader" type="button">Enter bootloader mode</button>
+<p id="bootloader-message" role="status" aria-live="polite"></p>
+</section>
 <script>
 const element = id => document.getElementById(id);
 let loaded = false;
 let saving = false;
+let bootloaderPending = false;
 const states = {waiting_for_wifi: 'Waiting for Wi-Fi', connecting: 'Connecting to MQTT…', connected: 'MQTT connected', disconnected: 'MQTT disconnected'};
 async function refresh() {
-  if (saving) return;
+  if (saving || bootloaderPending) return;
   try {
     const response = await fetch('/api/mqtt', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
     if (!response.ok) throw new Error('Could not read settings.');
     const data = await response.json();
+    if (bootloaderPending) return;
     element('status').textContent = (states[data.status] || data.status) + (data.last_error ? ' — ' + data.last_error : '');
     if (!loaded) {
       for (const key of ['host', 'port', 'username']) element(key).value = data[key];
@@ -73,14 +81,16 @@ async function refresh() {
     element('fields').disabled = !data.storage_available;
     if (!data.storage_available && !element('message').textContent) element('message').textContent = 'Configuration storage is unavailable. Check the diagnostic log below.';
   } catch (_) {
+    if (bootloaderPending) return;
     element('status').textContent = 'Device unreachable. Reconnecting…';
   }
 }
 element('settings').addEventListener('submit', async event => {
   event.preventDefault();
-  if (saving) return;
+  if (saving || bootloaderPending) return;
   saving = true;
   element('save').disabled = true;
+  element('bootloader').disabled = true;
   element('message').textContent = 'Saving…';
   const body = {host: element('host').value, port: Number(element('port').value), username: element('username').value};
   if (element('password').value) body.password = element('password').value;
@@ -98,6 +108,7 @@ element('settings').addEventListener('submit', async event => {
   } finally {
     saving = false;
     element('save').disabled = false;
+    element('bootloader').disabled = false;
     await refresh();
   }
 });
@@ -111,14 +122,14 @@ let diagnosticSummary = '';
 const seconds = ms => ms === null ? 'unknown' : (ms / 1000).toFixed(3) + ' s';
 
 async function refreshDiagnostics() {
-  if (paused || saving) return;
+  if (paused || saving || bootloaderPending) return;
   try {
     // Small pages bound each response and the work done on the device.
     for (let page = 0; page < 4; page++) {
       const response = await fetch('/api/diagnostics?after=' + logAfter, {cache: 'no-store', signal: AbortSignal.timeout(8000)});
       if (!response.ok) throw new Error('Could not read diagnostics.');
       const data = await response.json();
-      if (paused) return;
+      if (paused || bootloaderPending) return;
       if (bootId !== null && bootId !== data.boot_id) {
         logAfter = 0;
         logLines = ['--- Device restarted; previous device log was cleared ---'];
@@ -154,11 +165,13 @@ async function refreshDiagnostics() {
       if (page === 3) return true;
     }
   } catch (_) {
+    if (bootloaderPending) return;
     element('diagnostic-status').textContent = 'Device unreachable. Keeping collected log and retrying…';
   }
 }
 
 element('pause-log').addEventListener('click', () => {
+  if (bootloaderPending) return;
   paused = !paused;
   element('pause-log').textContent = paused ? 'Resume updates' : 'Pause updates';
   element('pause-log').setAttribute('aria-pressed', String(paused));
@@ -177,5 +190,43 @@ element('download-log').addEventListener('click', () => {
   const more = await refreshDiagnostics();
   setTimeout(pollDiagnostics, more ? 250 : 2000);
 })();
+
+element('bootloader').addEventListener('click', async () => {
+  if (saving || bootloaderPending) return;
+  if (!confirm('Enter bootloader mode? Meter readings, MQTT, and this page will stop. Connect a USB data cable to flash firmware, or power-cycle the device to resume.')) return;
+  bootloaderPending = true;
+  element('bootloader').disabled = true;
+  element('fields').disabled = true;
+  element('pause-log').disabled = true;
+  element('bootloader-message').textContent = 'Requesting bootloader mode…';
+  element('diagnostic-status').textContent = 'Updates paused for bootloader request';
+  try {
+    const response = await fetch('/api/bootloader', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Han-Settings': '1'},
+      body: JSON.stringify({confirm: true}), signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok) {
+      let message = 'Bootloader request rejected (' + response.status + ').';
+      try { message = (await response.json()).message || message; } catch (_) {}
+      bootloaderPending = false;
+      element('bootloader').disabled = false;
+      element('pause-log').disabled = false;
+      element('bootloader-message').textContent = message;
+      element('diagnostic-status').textContent = paused ? 'Paused · the device continues recording' : 'Resuming…';
+      await refresh();
+      return;
+    }
+    const result = await response.json();
+    if (result.accepted !== true) throw new Error('Missing acknowledgement');
+    element('status').textContent = 'Restarting into bootloader mode';
+    element('bootloader-message').textContent = result.message;
+    element('diagnostic-status').textContent = 'Updates stopped for USB flashing';
+  } catch (_) {
+    // The command may already have been accepted. Never retry automatically.
+    element('status').textContent = 'Bootloader request unconfirmed';
+    element('bootloader-message').textContent = 'The device may already be waiting for USB flashing. Check USB or power-cycle it. Reload this page if it is still running.';
+    element('diagnostic-status').textContent = 'Updates stopped · bootloader request unconfirmed';
+  }
+});
 </script>
 </html>

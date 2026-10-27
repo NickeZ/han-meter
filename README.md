@@ -84,6 +84,10 @@ espflash flash --chip esp32c3 --port /dev/ttyACM0 --monitor \
 
 Use `espflash board-info` to confirm the connected chip and flash capacity. Espflash checks the image against the selected application partition when flashing. No OTA partition scheme or network update service is included.
 
+To enter USB flashing mode from the running firmware, open the device's web page, find **Firmware update**, and select **Enter bootloader mode**. Confirm the prompt with a USB data cable available. The device completes its HTTP response attempt before resetting into the ROM bootloader; UART reception, MQTT, and the web interface then stop. The page stops polling and does not retry the command if its acknowledgement is lost. Flash using the commands above, or power-cycle the device to resume the installed firmware. Disconnect both HAN/P1 and USB power for a full power cycle, then reconnect and reload the page. Entering bootloader mode does not erase firmware or saved settings.
+
+This uses the ESP32-C3's `RTC_CNTL_FORCE_DOWNLOAD_BOOT` bit and a software system reset, as described in [Espressif's Chip Boot Control documentation](https://documentation.espressif.com/esp32-c3_technical_reference_manual_en.pdf). The API refuses entry if the chip's eFuses disable forced download, download mode, or USB download access; it never modifies eFuses. The control remains available when MQTT is disconnected or settings storage is unavailable.
+
 For compilation without real credentials, use the example configuration explicitly:
 
 ```sh
@@ -100,7 +104,7 @@ Edit the broker host, port, username, and optional new password, then select **S
 
 The page shows MQTT connection status and refreshes it every five seconds without overwriting edits. Saving persists the settings before reconnecting MQTT, without rebooting or clearing the latest meter readings. It also interrupts an ongoing connection attempt or retry delay. Incorrect credentials or an unreachable broker remain saved, and the page stays available so you can correct them. The old broker's Last Will marks the previous connection offline; discovery and fresh readings are published on the new connection.
 
-The page uses plain HTTP without a login, intended for a trusted local network. Devices on that network can view the broker address/username and change the settings. Credentials travel over HTTP when replaced. Browser writes must originate from the device's page; the API grants no CORS access.
+The page uses plain HTTP without a login, intended for a trusted local network. Devices on that network can view the broker address/username, change the settings, and request bootloader mode. Credentials travel over HTTP when replaced. Browser writes must originate from the device's page; the API grants no CORS access.
 
 Saved settings override the compiled MQTT defaults, including after ordinary reflashing. The firmware uses its own checksummed, two-sector journal in the first 8 KiB of the existing `nvs` data partition; it does not use the ESP-IDF NVS format or change the partition layout. Unchanged saves do not write flash. An interrupted update preserves the previous committed record, and blank or corrupt records fall back to the firmware defaults. If the partition is missing, overlaps other data, contains an unsupported format, or cannot be read safely, the firmware uses defaults and disables saving. A flash-write failure keeps the current runtime settings active and disables further writes until restart.
 
@@ -122,8 +126,9 @@ The browser uses these local HTTP endpoints:
 | `GET /api/mqtt` | `host`, `port`, `username`, `password_set`, `status`, `last_error`, and `storage_available`; never the password |
 | `GET /api/diagnostics?after=<sequence>` | Live reception counters and up to 4 diagnostic events after the supplied sequence (default 0); no credentials |
 | `POST /api/mqtt` | JSON containing `host`, `port`, `username`, and optional `password`; omitted, null, or empty password preserves the current one |
+| `POST /api/bootloader` | Requires `{"confirm":true}`; returns HTTP 202 with `accepted` and `message` before a ROM bootloader restart, or HTTP 503 if disabled on this chip |
 
-API writes require `Content-Type: application/json`, `Content-Length`, and `X-Han-Settings: 1`. Bodies are limited to 4096 bytes, and unknown fields are rejected. A successful response reports `saved`, `changed`, and `message`; saved settings do not imply a successful broker connection. Settings responses are not cached, and the server bounds requests with five-second read/write timeouts.
+API writes require `Content-Type: application/json`, `Content-Length`, and `X-Han-Settings: 1`. Bodies are limited to 4096 bytes, and unknown fields are rejected. A successful MQTT settings response reports `saved`, `changed`, and `message`; saved settings do not imply a successful broker connection. Settings and bootloader responses are not cached, and the server bounds requests with five-second read/write timeouts. Bootloader commands require POST with explicit confirmation; GET, HEAD, malformed or incomplete bodies, and cross-origin requests cannot trigger a restart.
 
 ## Debug without USB
 
@@ -257,6 +262,7 @@ The ESP crates are pinned together at compatible releases: `esp-hal` 1.2.2, `esp
 
 The software tests do not replace these checks on the actual meter and board:
 
+- With USB available, cancel **Enter bootloader mode** and verify reception/MQTT continue. Confirm it, check that the page acknowledges the restart and stops polling, then verify `espflash board-info` can communicate with the ROM bootloader. Flash and restart, and separately test a full power cycle without flashing; confirm saved settings and normal telemetry return. Host tests cover HTTP/UI behavior, not the chip's ROM transition.
 - On a dual-stack LAN, verify both DHCP and SLAAC URLs appear, connect to an IPv6 broker literal and an AAAA-only hostname, and save settings through the IPv6 URL. Check fallback with an unreachable AAAA address and a reachable A address. Repeat on IPv4-only Wi-Fi.
 - Disable DHCPv4 and verify an IPv6 broker literal works using SLAAC. Test a link-local broker literal on the same link without router advertisements, then reconnect Wi-Fi and confirm recovery.
 

@@ -15,6 +15,8 @@ struct App {
     control: Control<NoopRawMutex>,
     failing: Cell<bool>,
     writes: Cell<usize>,
+    bootloader_requests: Cell<usize>,
+    bootloader_available: Cell<bool>,
     log: Log<NoopRawMutex>,
 }
 impl App {
@@ -23,11 +25,21 @@ impl App {
             control: Control::new(MqttSettings::new("broker", 1883, "meter", "secret").unwrap()),
             failing: Cell::new(false),
             writes: Cell::new(0),
+            bootloader_requests: Cell::new(0),
+            bootloader_available: Cell::new(true),
             log: Log::new(),
         }
     }
 }
 impl Application for App {
+    fn request_bootloader(&self) -> Result<(), web::BootloaderError> {
+        if !self.bootloader_available.get() {
+            return Err(web::BootloaderError);
+        }
+        self.bootloader_requests
+            .set(self.bootloader_requests.get() + 1);
+        Ok(())
+    }
     fn snapshot(&self) -> han_config::control::Snapshot {
         self.control.snapshot()
     }
@@ -127,6 +139,104 @@ fn post(body: &str) -> String {
         "POST /api/mqtt HTTP/1.1\r\nHost: device\r\nOrigin: http://device\r\nX-Han-Settings: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bootloader_requires_an_explicit_valid_local_post() {
+    let app = App::new();
+    let command = |body: &str| post(body).replacen("/api/mqtt", "/api/bootloader", 1);
+    let valid = command(r#"{"confirm":true}"#);
+    for method in ["GET", "HEAD", "OPTIONS"] {
+        let response = exchange(
+            &app,
+            &format!(
+                "{method} /api/bootloader HTTP/1.1\r\nHost: device\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 405"), "{response}");
+    }
+    for request in [
+        valid.replace("Origin: http://device", "Origin: http://evil.example"),
+        valid.replace("Host: device", "Host: evil.example"),
+        valid.replace("X-Han-Settings: 1\r\n", ""),
+    ] {
+        assert!(exchange(&app, &request).await.starts_with("HTTP/1.1 403"));
+    }
+    for body in [
+        "{}",
+        "null",
+        r#"{"confirm":false}"#,
+        r#"{"confirm":"true"}"#,
+        r#"{"confirm":true,"extra":1}"#,
+        r#"{"confirm":true}junk"#,
+    ] {
+        assert!(
+            exchange(&app, &command(body))
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
+    }
+    assert!(
+        exchange(&app, &valid.replace("application/json", "text/plain"))
+            .await
+            .starts_with("HTTP/1.1 415")
+    );
+    assert!(
+        exchange(&app, &command(&" ".repeat(web::BODY_LIMIT + 1)))
+            .await
+            .starts_with("HTTP/1.1 413")
+    );
+    assert!(
+        exchange(&app, &valid.replace("Content-Length: 16\r\n", ""))
+            .await
+            .starts_with("HTTP/1.1 411")
+    );
+    assert!(
+        exchange(
+            &app,
+            &valid.replace(
+                "Content-Length: 16",
+                "Transfer-Encoding: chunked\r\nContent-Length: 16"
+            )
+        )
+        .await
+        .starts_with("HTTP/1.1 400")
+    );
+    // A body that stalls before its final byte must never queue a restart.
+    assert!(
+        !exchange(&app, &valid[..valid.len() - 1])
+            .await
+            .starts_with("HTTP/1.1 202")
+    );
+    assert_eq!(app.bootloader_requests.get(), 0);
+
+    // Bootloader entry is independent of MQTT connectivity and flash settings.
+    app.failing.set(true);
+    let response = exchange(&app, &valid).await;
+    assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+    assert!(response.contains("\"accepted\":true"));
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store")
+    );
+    assert_eq!(app.bootloader_requests.get(), 1);
+    assert_eq!(app.writes.get(), 0);
+    assert_eq!(app.snapshot().settings.host, "broker");
+    assert_eq!(app.snapshot().settings.password, "secret");
+
+    let ipv6 = valid
+        .replace("Host: device", "Host: [2001:db8::80]")
+        .replace("Origin: http://device", "Origin: http://[2001:db8::80]");
+    assert!(exchange(&app, &ipv6).await.starts_with("HTTP/1.1 202"));
+    assert_eq!(app.bootloader_requests.get(), 2);
+
+    app.bootloader_available.set(false);
+    let response = exchange(&app, &valid).await;
+    assert!(response.starts_with("HTTP/1.1 503"));
+    assert!(response.contains("\"accepted\":false"));
+    assert_eq!(app.bootloader_requests.get(), 2);
 }
 
 #[test]

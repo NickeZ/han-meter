@@ -11,7 +11,7 @@ use picoserve::{
     extract::{FromRequest, FromRequestParts, Query, State},
     request::{RequestBody, RequestParts},
     response::{Json, StatusCode},
-    routing::{PathRouter, get},
+    routing::{PathRouter, get, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,10 +44,16 @@ pub trait Application {
     fn storage_available(&self) -> bool;
     /// Accept the current device IP or advertised DHCP hostname (optional :80).
     fn host_allowed(&self, host: &str) -> bool;
+    /// Queue bootloader entry; the board must finish the HTTP response before
+    /// resetting. Return an error if software USB download mode is unavailable.
+    fn request_bootloader(&self) -> Result<(), BootloaderError>;
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct SaveError;
+
+#[derive(Clone, Copy, Debug)]
+pub struct BootloaderError;
 
 #[derive(Serialize)]
 struct View {
@@ -114,6 +120,32 @@ impl<'r, S> FromRequest<'r, S> for Body {
         decode_update(bytes)
             .map(Self)
             .map_err(|message| (StatusCode::BAD_REQUEST, message))
+    }
+}
+
+struct BootloaderBody;
+impl<'r, S> FromRequest<'r, S> for BootloaderBody {
+    type Rejection = Rejection;
+    async fn from_request<R: picoserve::io::Read>(
+        _: &'r S,
+        _: RequestParts<'r>,
+        body: RequestBody<'r, R>,
+    ) -> Result<Self, Rejection> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Command {
+            confirm: bool,
+        }
+        let bytes = body
+            .read_all()
+            .await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Could not read request body."))?;
+        let (command, used): (Command, _) = serde_json_core::from_slice(bytes)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Send {\"confirm\":true}."))?;
+        if !command.confirm || !bytes[used..].iter().all(u8::is_ascii_whitespace) {
+            return Err((StatusCode::BAD_REQUEST, "Send {\"confirm\":true}."));
+        }
+        Ok(Self)
     }
 }
 
@@ -205,6 +237,12 @@ struct SaveResponse {
     message: &'static str,
 }
 
+#[derive(Serialize)]
+struct BootloaderResponse {
+    accepted: bool,
+    message: &'static str,
+}
+
 #[derive(Deserialize)]
 struct LogQuery {
     #[serde(default)]
@@ -213,6 +251,19 @@ struct LogQuery {
 
 pub fn router<A: Application>(app: &A) -> Router<impl PathRouter + '_> {
     Router::new()
+        .route("/api/bootloader", post(async |_: WriteRequest, State(app): State<&A>, _: BootloaderBody| {
+            let (status, response) = match app.request_bootloader() {
+                Ok(()) => (StatusCode::ACCEPTED, BootloaderResponse {
+                    accepted: true,
+                    message: "Restarting into bootloader mode. Flash over USB, or power-cycle the device to resume normal operation.",
+                }),
+                Err(_) => (StatusCode::SERVICE_UNAVAILABLE, BootloaderResponse {
+                    accepted: false,
+                    message: "Software USB bootloader entry is disabled on this device.",
+                }),
+            };
+            Json(response).into_response().with_status_code(status).with_header("Cache-Control", "no-store")
+        }))
         .route("/", get(async |_: LocalRequest| {
             Html
         }))

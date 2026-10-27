@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod bootloader;
 mod broker;
 mod diagnostics;
 mod dma_ring;

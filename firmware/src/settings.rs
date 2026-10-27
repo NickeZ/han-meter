@@ -147,9 +147,18 @@ struct HttpApplication {
     store: RefCell<Option<SettingsStore>>,
     addresses: Cell<Addresses>,
     hostname: String,
+    bootloader_requested: Cell<bool>,
 }
 
 impl web::Application for HttpApplication {
+    fn request_bootloader(&self) -> Result<(), web::BootloaderError> {
+        if !crate::bootloader::available() {
+            return Err(web::BootloaderError);
+        }
+        self.bootloader_requested.set(true);
+        Ok(())
+    }
+
     fn snapshot(&self) -> han_config::control::Snapshot {
         self.control.snapshot()
     }
@@ -199,6 +208,7 @@ pub(crate) async fn http(control: &'static SettingsControl, store: Option<Settin
         store: RefCell::new(store),
         addresses: Cell::new([None; 3]),
         hostname: String::new(),
+        bootloader_requested: Cell::new(false),
     };
     let (hostname, mut listener) = HTTP_CONFIG.wait().await;
     app.hostname = hostname;
@@ -216,6 +226,14 @@ pub(crate) async fn http(control: &'static SettingsControl, store: Option<Settin
         let _ = picoserve::Server::new(&router, &config, http_buffer)
             .serve(connection)
             .await;
+        if app.bootloader_requested.replace(false) {
+            // serve() has finished its bounded response/close attempt through
+            // the network owner. Never reset inside the request handler and
+            // cut off a successful acknowledgement. A lost response does not
+            // undo an already accepted command.
+            log!("Entering USB ROM bootloader at web request");
+            crate::bootloader::enter();
+        }
     }
 }
 
