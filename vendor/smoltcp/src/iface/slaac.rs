@@ -6,8 +6,8 @@ use crate::time::{Duration, Instant};
 use crate::wire::NdiscPrefixInfoFlags;
 use crate::wire::{Ipv6Address, Ipv6Cidr, NdiscPrefixInformation, ipv6::AddressExt};
 
-const MAX_RTR_SOLICITATIONS: u8 = 3;
 const RTR_SOLICITATION_INTERVAL: Duration = Duration::from_secs(4);
+const MAX_RTR_SOLICITATION_INTERVAL: Duration = Duration::from_secs(3600);
 const IPV6_DEFAULT: Ipv6Cidr = Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, 0);
 
 /// Router solicitation state machine
@@ -90,8 +90,8 @@ pub struct Slaac {
     sync_required: bool,
     /// Time to next router solicitation.
     retry_rs_at: Instant,
-    /// Number of solicitations emitted.
-    num_solicitations: u8,
+    /// Previous retransmission delay, zero before the first solicitation.
+    retry_rs_delay: Duration,
 }
 
 impl Slaac {
@@ -102,7 +102,7 @@ impl Slaac {
             phase: Phase::Start,
             sync_required: false,
             retry_rs_at: Instant::from_millis(0),
-            num_solicitations: MAX_RTR_SOLICITATIONS,
+            retry_rs_delay: Duration::ZERO,
         }
     }
 
@@ -201,7 +201,9 @@ impl Slaac {
         }
 
         // Advertisement might be unsolicited
-        if self.phase == Phase::Discovering {
+        // RFC 7559 section 2.1: a router that does not offer a default route
+        // must not stop discovery of other routers.
+        if self.phase == Phase::Discovering && router_lifetime > Duration::ZERO {
             self.phase = Phase::Maintaining;
         }
     }
@@ -244,11 +246,7 @@ impl Slaac {
     /// Get whether a router solicitation must be emitted.
     pub(crate) fn rs_required(&self, now: Instant) -> bool {
         match self.phase {
-            Phase::Start | Phase::Discovering
-                if self.retry_rs_at <= now && self.num_solicitations > 0 =>
-            {
-                true
-            }
+            Phase::Start | Phase::Discovering if self.retry_rs_at <= now => true,
             _ => false,
         }
     }
@@ -256,16 +254,27 @@ impl Slaac {
     /// Update router solicitation tracking state
     ///
     /// Must be called after sending a router solicitation on the interface.
-    pub(crate) fn rs_sent(&mut self, now: Instant) {
+    pub(crate) fn rs_sent(&mut self, now: Instant, random: u32) {
         match self.phase {
             Phase::Start | Phase::Discovering if self.retry_rs_at <= now => {
-                if self.num_solicitations == 0 {
-                    self.phase = Phase::None;
+                // RFC 7559 / RFC 3315 section 14: keep soliciting with
+                // exponential backoff and +/-10% jitter, capped at about an
+                // hour. Losing the first three packets must not strand IPv6.
+                let jitter = u64::from(random % 201);
+                let millis = if self.retry_rs_delay == Duration::ZERO {
+                    RTR_SOLICITATION_INTERVAL.total_millis() * (900 + jitter) / 1000
                 } else {
-                    self.num_solicitations -= 1;
-                    self.phase = Phase::Discovering;
-                    self.retry_rs_at = now + RTR_SOLICITATION_INTERVAL;
-                }
+                    self.retry_rs_delay.total_millis() * (1900 + jitter) / 1000
+                };
+                let maximum = MAX_RTR_SOLICITATION_INTERVAL.total_millis();
+                let millis = if millis > maximum {
+                    maximum * (900 + jitter) / 1000
+                } else {
+                    millis
+                };
+                self.retry_rs_delay = Duration::from_millis(millis);
+                self.phase = Phase::Discovering;
+                self.retry_rs_at = now + self.retry_rs_delay;
             }
             _ => (),
         }
@@ -344,21 +353,23 @@ mod test {
         let now = Instant::from_millis(1);
         assert!(slaac.rs_required(now));
 
-        slaac.rs_sent(now);
-        assert_eq!(slaac.num_solicitations, 2);
+        // 100 selects zero jitter.
+        slaac.rs_sent(now, 100);
         assert!(!slaac.rs_required(now));
 
         let next_poll = slaac.poll_at(now).unwrap();
         assert_eq!(next_poll, now + RTR_SOLICITATION_INTERVAL);
 
-        let now = next_poll;
-        assert!(slaac.rs_required(now));
-
-        slaac.num_solicitations = 0;
-        assert!(!slaac.rs_required(now));
-        slaac.rs_sent(now);
-        assert_eq!(slaac.phase, Phase::None);
-        assert!(slaac.poll_at(now).is_none());
+        let mut now = next_poll;
+        for seconds in [8, 16, 32] {
+            assert!(slaac.rs_required(now));
+            slaac.rs_sent(now, 100);
+            assert_eq!(slaac.phase, Phase::Discovering);
+            assert!(!slaac.rs_required(now));
+            let next = slaac.poll_at(now).unwrap();
+            assert_eq!(next, now + Duration::from_secs(seconds));
+            now = next;
+        }
     }
 
     #[test]
@@ -374,7 +385,7 @@ mod test {
         assert!(slaac.has_ra_update());
 
         let now = Instant::from_secs(300);
-        slaac.rs_sent(now);
+        slaac.rs_sent(now, 100);
         assert_eq!(slaac.phase, Phase::Discovering);
 
         // Solicited advertisement
@@ -441,7 +452,7 @@ mod test {
     fn test_ra_expire() {
         let mut slaac = Slaac::new();
         let now = Instant::from_millis(1);
-        slaac.rs_sent(now);
+        slaac.rs_sent(now, 100);
         slaac.process_advertisement(&SOURCE, VALID, Some(PREFIX), now);
 
         let now = Instant::from_secs(300);

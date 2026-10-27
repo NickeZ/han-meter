@@ -51,6 +51,8 @@ Edit `config.toml` with your device name, 2.4 GHz Wi-Fi credentials, and initial
 
 IPv4 uses DHCP and IPv6 uses SLAAC router advertisements, with both enabled together. For hostnames, MQTT tries AAAA records first when IPv6 is configured, then falls back to A records when IPv4 is configured. It tries up to four addresses per family, with a five-second TCP connection timeout per address. An IPv4-only network does not wait for IPv6 configuration.
 
+IPv6 router discovery retries unanswered requests with exponential backoff and jitter, starting at about four seconds and backing off to about an hour. Losing the initial requests does not require a reboot; retries stop when a router advertises a default route. The local [smoltcp patches](vendor/smoltcp/PATCHES.md) also preserve discovery timers when network sockets are idle.
+
 On an IPv6-only network, use a literal broker address. The pinned network stack does not learn DNS servers from IPv6 router advertisements (RDNSS) or implement DHCPv6; hostname lookup relies on DNS servers supplied by DHCPv4. A global or ULA IPv6 address requires a router advertising a SLAAC prefix. Link-local broker literals also work on the same Wi-Fi link without DHCP or a router.
 
 The firmware sends a DHCP hostname of `han-` followed by the station MAC address as twelve lowercase hexadecimal digits (for example, `han-aabbccddeeff`). The USB startup log shows the name. Routers that display DHCP hostnames can use it in their client list; a cached entry may take time to refresh after reflashing. `device_name` controls the Home Assistant display name. DHCP hostname advertisement does not provide a `.local` mDNS name.

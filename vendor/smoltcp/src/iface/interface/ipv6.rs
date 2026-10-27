@@ -736,6 +736,8 @@ impl Interface {
                 &mut self.fragmenter,
             )
             .unwrap();
-        self.inner.slaac.rs_sent(self.inner.now);
+        self.inner
+            .slaac
+            .rs_sent(self.inner.now, self.inner.rand.rand_u32());
     }
 }

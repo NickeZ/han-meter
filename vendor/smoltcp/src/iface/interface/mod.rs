@@ -606,7 +606,13 @@ impl Interface {
 
         #[cfg(feature = "proto-ipv6-slaac")]
         if self.inner.slaac_enabled {
-            res = res.min(self.inner.slaac.poll_at(timestamp));
+            // None means no deadline, not an earlier deadline than Some.
+            // Option::min would suppress SLAAC timers on an idle interface,
+            // or suppress socket timers when SLAAC has nothing scheduled.
+            res = res
+                .into_iter()
+                .chain(self.inner.slaac.poll_at(timestamp))
+                .min();
         }
 
         res
