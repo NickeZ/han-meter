@@ -1,6 +1,6 @@
 use core::{cell::RefCell, fmt};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::uart::RxError;
 use han_config::diagnostics::{DmaStats, Log, Page, Snapshot, UartErrors};
 
@@ -52,15 +52,38 @@ pub(crate) fn boot_id() -> u32 {
     RX.lock(|state| state.borrow().boot_id)
 }
 
-// Mirror existing infrequent USB messages. Receive errors use record() only,
-// avoiding synchronous USB output in the UART task.
+// Recording never waits for USB or networking, including on the MQTT thread.
 macro_rules! log {
     ($($arg:tt)*) => {{
         $crate::diagnostics::record(core::format_args!($($arg)*));
-        esp_println::println!($($arg)*);
     }};
 }
 pub(crate) use log;
+
+/// Best-effort USB output on the background executor. Async USB writes leave
+/// interrupts enabled; an absent/slow monitor cannot hold up MQTT or UART.
+#[embassy_executor::task]
+pub(crate) async fn usb(peripheral: esp_hal::peripherals::USB_DEVICE<'static>) {
+    use picoserve::io::Write;
+    let mut usb = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripheral).into_async();
+    let mut after = 0;
+    loop {
+        // Keep only one event across USB awaits, not an entire HTTP log page.
+        let entry = log_page(after).entries.into_iter().next();
+        if let Some(entry) = entry {
+            after = entry.sequence;
+            let _ = with_timeout(Duration::from_millis(20), async {
+                usb.write_all(entry.message.as_bytes()).await?;
+                usb.write_all(b"\n").await?;
+                Write::flush(&mut usb).await
+            })
+            .await;
+            Timer::after_millis(10).await;
+        } else {
+            Timer::after_millis(100).await;
+        }
+    }
+}
 
 pub(crate) fn log_heap(stage: &str) {
     // Snapshot before logging: formatting must not run under the allocator lock.

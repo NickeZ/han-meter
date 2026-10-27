@@ -1,23 +1,17 @@
 //! Bounded, retrying HTTPS export of the application diagnostic log.
 use crate::{
     diagnostics::{self, log},
-    network,
+    log_transport,
 };
 use alloc::{string::String, vec::Vec};
 use core::cell::{Cell, RefCell};
-use embassy_net::{
-    Stack,
-    dns::DnsQueryType,
-    tcp::TcpSocket,
-    udp::{PacketMetadata, UdpSocket},
-};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
-use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_hal::rng::{Rng, Trng};
+use embassy_time::{Duration, Instant, Timer, with_deadline};
+use esp_hal::rng::Trng;
 use han_core::Backoff;
 use han_logs::{
-    BATCH_BYTES, Endpoint, Identity, ntp,
-    ntp::client::{Error as NtpError, Family as NtpFamily},
+    BATCH_BYTES, Endpoint, Identity,
+    ntp::client::Error as NtpError,
     tls::{self, TlsClock},
 };
 
@@ -65,7 +59,7 @@ impl TlsClock for Clock {
     }
 }
 
-fn buffer(size: usize) -> Result<Vec<u8>, ()> {
+pub(crate) fn buffer(size: usize) -> Result<Vec<u8>, ()> {
     let mut result = Vec::new();
     result.try_reserve_exact(size).map_err(|_| ())?;
     result.resize(size, 0);
@@ -80,7 +74,7 @@ enum Error {
 }
 
 #[embassy_executor::task]
-pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
+pub(crate) async fn run(config: Config, device: String, mut stream: log_transport::Stream) {
     let endpoint = Endpoint::parse(config.url).expect("validated VictoriaLogs URL");
     // Wi-Fi owns the entropy source for the firmware lifetime. TLS never uses
     // the pseudorandom-only Rng as a cryptographic RNG.
@@ -98,13 +92,8 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
             return;
         }
     };
-    let (mut body, mut rx, mut tx, mut scratch) = match (
-        buffer(BATCH_BYTES),
-        buffer(2048),
-        buffer(2048),
-        buffer(han_logs::HEADER_BYTES),
-    ) {
-        (Ok(body), Ok(rx), Ok(tx), Ok(scratch)) => (body, rx, tx, scratch),
+    let (mut body, mut scratch) = match (buffer(BATCH_BYTES), buffer(han_logs::HEADER_BYTES)) {
+        (Ok(body), Ok(scratch)) => (body, scratch),
         _ => {
             log!("VictoriaLogs disabled: insufficient buffer memory");
             return;
@@ -123,13 +112,21 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
     let mut clock_error = None;
     let mut last_sync = None;
     let mut boot_unix_ms = None;
-    log!("VictoriaLogs HTTPS export enabled");
-    diagnostics::log_heap("log buffers allocated");
+    log!(
+        "VictoriaLogs HTTPS export enabled; background priority={}, MQTT priority={}",
+        crate::scheduling::BACKGROUND_PRIORITY,
+        crate::scheduling::MQTT_PRIORITY
+    );
+    let heap = esp_alloc::HEAP.stats();
+    log!(
+        "Heap log buffers allocated: free={}B min_free={}B total={}B",
+        heap.size - heap.current_usage,
+        heap.size - heap.max_usage,
+        heap.size
+    );
     loop {
-        stack.wait_config_up().await;
-        if let Err(reason) =
-            refresh_clock(stack, config.ntp_server, &mut last_sync, &mut boot_unix_ms).await
-        {
+        log_transport::wait_config().await;
+        if let Err(reason) = refresh_clock(&mut last_sync, &mut boot_unix_ms).await {
             if clock_error != Some(reason) {
                 log!("VictoriaLogs waiting for NTP: {:?}", reason);
                 clock_error = Some(reason);
@@ -156,10 +153,8 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
         // Keep these exact bytes and this cursor until acknowledged. Dropping a
         // timed-out TLS future destroys its session; the next attempt starts fresh.
         loop {
-            stack.wait_config_up().await;
-            if let Err(reason) =
-                refresh_clock(stack, config.ntp_server, &mut last_sync, &mut boot_unix_ms).await
-            {
+            log_transport::wait_config().await;
+            if let Err(reason) = refresh_clock(&mut last_sync, &mut boot_unix_ms).await {
                 if clock_error != Some(reason) {
                     log!("VictoriaLogs waiting for NTP: {:?}", reason);
                     clock_error = Some(reason);
@@ -168,27 +163,27 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
                 continue;
             }
             clock_error = None;
-            let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
-            socket.set_timeout(Some(Duration::from_secs(15)));
-            let result = with_timeout(Duration::from_secs(45), async {
-                network::connect_tcp(stack, &mut socket, endpoint.host(), endpoint.port())
-                    .await
-                    .map_err(Error::Connect)?;
-                tls.post(
-                    &mut socket,
-                    &endpoint,
-                    config.authorization,
-                    &body[..len],
-                    scratch.as_mut_slice().try_into().unwrap(),
+            let deadline = Instant::now() + Duration::from_secs(45);
+            // Control requests always finish; only the TLS future is cancelled.
+            // Close waits for the socket owner to cancel I/O and discard queued
+            // bytes before the next TLS session can use the bridge.
+            let result = match log_transport::connect().await {
+                Ok(()) => with_deadline(
+                    deadline,
+                    tls.post(
+                        &mut stream,
+                        &endpoint,
+                        config.authorization,
+                        &body[..len],
+                        scratch.as_mut_slice().try_into().unwrap(),
+                    ),
                 )
                 .await
-                .map_err(Error::Upload)
-            })
-            .await
-            .unwrap_or(Err(Error::Timeout));
-            socket.abort();
-            let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
-            drop(socket);
+                .map_err(|_| Error::Timeout)
+                .and_then(|result| result.map_err(Error::Upload)),
+                Err(reason) => Err(Error::Connect(reason)),
+            };
+            log_transport::close().await;
             match result {
                 Ok(()) => {
                     if after == 0 {
@@ -228,86 +223,18 @@ pub(crate) async fn run(stack: Stack<'static>, config: Config, device: String) {
 }
 
 async fn refresh_clock(
-    stack: Stack<'_>,
-    server: &str,
     last_sync: &mut Option<Instant>,
     boot_unix_ms: &mut Option<u64>,
 ) -> Result<(), NtpError> {
     if last_sync.is_some_and(|last| last.elapsed() < Duration::from_secs(6 * 60 * 60)) {
         return Ok(());
     }
-    let unix = ntp::client::synchronize(&mut NtpTransport(stack), server).await?;
-    let uptime = Instant::now().as_millis();
+    // Timestamp on the network thread: foreground work may delay this thread
+    // after the SNTP response arrives, without making the wall clock run late.
+    let (unix, uptime) = log_transport::synchronize().await?;
     WALL_TIME.lock(|state| state.set(Some((unix, uptime))));
     boot_unix_ms.get_or_insert(unix.saturating_sub(uptime));
-    *last_sync = Some(Instant::now());
+    *last_sync = Some(Instant::from_millis(uptime));
     log!("NTP synchronized: unix_ms={}", unix);
     Ok(())
-}
-
-struct NtpTransport<'a>(Stack<'a>);
-
-impl ntp::client::Transport for NtpTransport<'_> {
-    fn configured(&self, family: NtpFamily) -> bool {
-        match family {
-            NtpFamily::Ipv6 => self.0.config_v6().is_some(),
-            NtpFamily::Ipv4 => self.0.config_v4().is_some(),
-        }
-    }
-
-    async fn resolve(
-        &mut self,
-        server: &str,
-        family: NtpFamily,
-    ) -> Result<heapless::Vec<core::net::IpAddr, 4>, NtpError> {
-        let query = match family {
-            NtpFamily::Ipv6 => DnsQueryType::Aaaa,
-            NtpFamily::Ipv4 => DnsQueryType::A,
-        };
-        let found = with_timeout(Duration::from_secs(5), self.0.dns_query(server, query))
-            .await
-            .map_err(|_| NtpError::DnsTimeout(family))?
-            .map_err(|_| NtpError::Dns(family))?;
-        Ok(found.into_iter().map(Into::into).collect())
-    }
-
-    async fn query(&mut self, address: core::net::IpAddr) -> Result<u64, NtpError> {
-        // A cancelled UDP send can leave a queued datagram. A fresh socket for
-        // each address prevents an unreachable peer from blocking fallback.
-        let mut rx_meta = [PacketMetadata::EMPTY; 1];
-        let mut tx_meta = [PacketMetadata::EMPTY; 1];
-        let mut rx = [0; 512];
-        let mut tx = [0; 48];
-        let mut socket = UdpSocket::new(self.0, &mut rx_meta, &mut rx, &mut tx_meta, &mut tx);
-        socket.bind(0).map_err(|_| NtpError::Bind)?;
-        let mut nonce = [0; 8];
-        Rng::new().read(&mut nonce);
-        let request = ntp::request(nonce);
-        let remote = embassy_net::IpEndpoint::new(address.into(), 123);
-        let mut rejected = None;
-        let result = with_timeout(Duration::from_secs(3), async {
-            socket
-                .send_to(&request, remote)
-                .await
-                .map_err(|_| NtpError::Send(address))?;
-            let mut packet = [0; 512];
-            loop {
-                let (len, source) = socket
-                    .recv_from(&mut packet)
-                    .await
-                    .map_err(|_| NtpError::Receive(address))?;
-                if source.endpoint == remote {
-                    match ntp::unix_ms(&packet[..len], nonce) {
-                        Ok(time) => return Ok(time),
-                        Err(reason) => rejected = Some(reason),
-                    }
-                }
-            }
-        })
-        .await;
-        result.unwrap_or(Err(match rejected {
-            Some(reason) => NtpError::Rejected(address, reason),
-            None => NtpError::Timeout(address),
-        }))
-    }
 }

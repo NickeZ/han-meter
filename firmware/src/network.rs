@@ -11,6 +11,62 @@ use esp_radio::wifi::{
 };
 use han_config::{MqttSettings, control::Status};
 use han_core::Backoff;
+use static_cell::StaticCell;
+
+pub(crate) async fn start(
+    spawner: embassy_executor::Spawner,
+    background: embassy_executor::SendSpawner,
+    peripheral: esp_hal::peripherals::WIFI<'static>,
+    control: &'static SettingsControl,
+) -> ! {
+    use crate::{diagnostics, http_transport, log_shipping, log_transport, settings};
+    use esp_hal::rng::Rng;
+    let controller =
+        WifiController::new(peripheral, Default::default()).expect("Wi-Fi initialization");
+    diagnostics::log_heap("Wi-Fi initialized");
+    let station = Interface::station();
+    let id = han_core::discovery::device_id(station.mac_address());
+    let hostname = id.replace('_', "-");
+    let mut dhcp = embassy_net::DhcpConfig::default();
+    dhcp.hostname = Some(hostname.as_str().try_into().expect("DHCP hostname length"));
+    let mut net_config = embassy_net::Config::dhcpv4(dhcp);
+    net_config.ipv6 = embassy_net::ConfigV6::Slaac;
+    let rng = Rng::new();
+    let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
+    // DHCP, DNS, HTTP, MQTT, log upload, and SNTP can coexist.
+    static RESOURCES: StaticCell<embassy_net::StackResources<6>> = StaticCell::new();
+    let (stack, net_runner) = embassy_net::new(
+        station,
+        net_config,
+        RESOURCES.init(embassy_net::StackResources::new()),
+        seed,
+    );
+    spawner.spawn(runner(net_runner).unwrap());
+    spawner.spawn(wifi(controller).unwrap());
+    if let Some((http_client, http_owner)) = http_transport::init() {
+        spawner.spawn(http_transport::run(stack, http_owner).unwrap());
+        spawner.spawn(http_transport::watch_addresses(stack).unwrap());
+        settings::configure_http(hostname.clone(), http_client);
+        background.spawn(settings::address_log().unwrap());
+    } else {
+        log!("Settings HTTP server disabled: insufficient buffer memory");
+    }
+    if let Some(config) = config::LOGGING {
+        if let Some((stream, socket_owner, buffers)) = log_transport::init() {
+            spawner.spawn(log_transport::run(stack, config, socket_owner, buffers).unwrap());
+            background.spawn(log_shipping::run(config, hostname.clone(), stream).unwrap());
+        } else {
+            log!("VictoriaLogs disabled: insufficient socket buffer memory");
+        }
+    }
+    log!(
+        "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
+        env!("CARGO_PKG_VERSION"),
+        id,
+        hostname
+    );
+    run(stack, &id, control).await
+}
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]

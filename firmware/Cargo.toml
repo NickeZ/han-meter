@@ -24,12 +24,15 @@ picoserve = { version = "=0.19.0", default-features = false, features = ["embass
 esp-hal = { version = "=1.2.2", features = ["esp32c3", "unstable"] }
 # These releases include the RISC-V idle scheduler and Wi-Fi cancellation fixes.
 esp-rtos = { version = "=0.4.0", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
+# Public thread creation interface implemented by the pinned esp-rtos runtime.
+esp-radio-rtos-driver = "=0.4.2"
 esp-radio = { version = "=1.0.0-beta.1", features = ["esp32c3", "wifi", "unstable"] }
 esp-alloc = { version = "=0.11.0", features = ["esp32c3", "internal-heap-stats"] }
 esp-bootloader-esp-idf = { version = "=0.6.0", features = ["esp32c3"] }
 esp-println = { version = "=0.18.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
 esp-backtrace = { version = "=0.20.0", features = ["esp32c3", "panic-handler", "println"] }
 embassy-executor = "=0.10.0"
+embassy-futures = "=0.1.2"
 embassy-net = { version = "=0.9.1", features = ["tcp", "udp", "dhcpv4-hostname", "dns", "medium-ethernet", "slaac"] }
 # IPv4, SLAAC, and IPv6 link-local must coexist; retain multiple DNS answers.
 smoltcp = { version = "=0.13.1", default-features = false, features = ["iface-max-addr-count-3", "dns-max-result-count-4"] }

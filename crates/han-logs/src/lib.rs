@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod http;
+pub mod io_bridge;
 pub mod ntp;
 #[cfg(feature = "tls")]
 pub mod tls;

@@ -3,11 +3,12 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use embassy_crypto_rand as _;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embedded_io_adapters::tokio_1::FromTokio;
 use han_config::diagnostics::Log;
 use han_logs::{
     BATCH_BYTES, Endpoint, HEADER_BYTES, Identity, encode_batch, http,
+    io_bridge::{Bridge, CHUNK_BYTES},
     tls::{self, TlsClock},
 };
 use std::{
@@ -136,8 +137,11 @@ async fn upload<C: TlsClock>(
         .await
         .unwrap();
     let mut scratch = [0; HEADER_BYTES];
+    let mut bridge = Bridge::<CriticalSectionRawMutex, CHUNK_BYTES>::new();
+    let (mut stream, mut socket_owner) = bridge.split();
+    let mut socket = FromTokio::new(socket);
     let future = tls.post(
-        FromTokio::new(socket),
+        &mut stream,
         &endpoint,
         "Basic dXNlcjpwYXNz",
         &body[..len],
@@ -147,9 +151,14 @@ async fn upload<C: TlsClock>(
         core::mem::size_of_val(&future) < 4096,
         "TLS future must not embed record/header buffers"
     );
-    timeout(Duration::from_secs(10), future)
-        .await
-        .expect("TLS request timed out")
+    timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = future => result,
+            _ = socket_owner.serve(&mut socket) => unreachable!(),
+        }
+    })
+    .await
+    .expect("TLS request timed out")
 }
 
 #[tokio::test]

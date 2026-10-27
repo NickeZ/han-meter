@@ -7,8 +7,12 @@ extern crate alloc;
 mod broker;
 mod diagnostics;
 mod dma_ring;
+mod http_socket;
+mod http_transport;
 mod log_shipping;
+mod log_transport;
 mod network;
+mod scheduling;
 mod settings;
 mod status_led;
 mod uart_dma;
@@ -25,9 +29,16 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
-use esp_hal::{clock::CpuClock, rng::Rng, timer::timg::TimerGroup};
+use esp_hal::{
+    clock::CpuClock,
+    interrupt::Priority,
+    peripherals::{DMA_CH0, GPIO0, UART1, UHCI0},
+    rng::Rng,
+    timer::timg::TimerGroup,
+};
+use esp_rtos::embassy::InterruptExecutor;
 use han_config::diagnostics::RateLimit;
-use han_core::{Decoder, Telemetry, discovery};
+use han_core::{Decoder, Telemetry};
 use static_cell::StaticCell;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -49,77 +60,77 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+    // All optional application work stays here, below the MQTT/network thread.
+    esp_rtos::CurrentThreadHandle::get().set_priority(scheduling::BACKGROUND_PRIORITY);
     diagnostics::initialize(Rng::new().random());
     diagnostics::log_heap("startup");
+    spawner.spawn(diagnostics::usb(peripherals.USB_DEVICE).unwrap());
     spawner.spawn(status_led::run(peripherals.RMT, peripherals.GPIO10).unwrap());
-    let (mqtt_settings, settings_store) =
-        settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
-
-    let rx = uart_dma::Receiver::new(
-        peripherals.UART1,
-        peripherals.GPIO0,
-        peripherals.UHCI0,
-        peripherals.DMA_CH0,
+    // UART reception preempts MQTT/networking and all background work.
+    // Priority 1 preempts thread mode without preempting the RTOS timer ISR.
+    // FROM_CPU_INTR0 is already reserved by esp_rtos::start.
+    static RX_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+    let rx_executor = RX_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR1));
+    rx_executor.start(Priority::Priority1).spawn(
+        receive(
+            peripherals.UART1,
+            peripherals.GPIO0,
+            peripherals.UHCI0,
+            peripherals.DMA_CH0,
+        )
+        .unwrap(),
     );
-    spawner.spawn(receive(rx).unwrap());
     spawner.spawn(report_diagnostics().unwrap());
 
-    let controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
-        .expect("Wi-Fi initialization");
-    diagnostics::log_heap("Wi-Fi initialized");
-    let station = esp_radio::wifi::Interface::station();
-    let id = discovery::device_id(station.mac_address());
-    // DHCP hostnames use hyphens; keep the MQTT/Home Assistant identifier unchanged.
-    let hostname = id.replace('_', "-");
-    let mut dhcp = embassy_net::DhcpConfig::default();
-    dhcp.hostname = Some(hostname.as_str().try_into().expect("DHCP hostname length"));
-    let mut net_config = embassy_net::Config::dhcpv4(dhcp);
-    net_config.ipv6 = embassy_net::ConfigV6::Slaac;
-    let rng = Rng::new();
-    let seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
-    // DHCP, DNS, HTTP, MQTT, log upload, and SNTP can coexist.
-    static RESOURCES: StaticCell<embassy_net::StackResources<6>> = StaticCell::new();
-    let (stack, runner) = embassy_net::new(
-        station,
-        net_config,
-        RESOURCES.init(embassy_net::StackResources::new()),
-        seed,
-    );
-    spawner.spawn(network::runner(runner).unwrap());
-    spawner.spawn(network::wifi(controller).unwrap());
-    spawner.spawn(settings::http(stack, mqtt_settings, settings_store, hostname.clone()).unwrap());
-    spawner.spawn(settings::address_log(stack).unwrap());
-    if let Some(config) = config::LOGGING {
-        spawner.spawn(log_shipping::run(stack, config, hostname.clone()).unwrap());
-    }
+    let (mqtt_settings, settings_store) =
+        settings::initialize(esp_storage::FlashStorage::new(peripherals.FLASH));
+    spawner.spawn(settings::http(mqtt_settings, settings_store).unwrap());
+    scheduling::start(peripherals.WIFI, mqtt_settings, spawner.make_send());
     log!(
-        "han-meter {} device={} hostname={} RX=GPIO0 inverted 115200 8N1",
-        env!("CARGO_PKG_VERSION"),
-        id,
-        hostname
+        "Task priorities: UART interrupt, MQTT/network={}, background={}",
+        scheduling::MQTT_PRIORITY,
+        scheduling::BACKGROUND_PRIORITY
     );
-    network::run(stack, &id, mqtt_settings).await
+    core::future::pending().await
 }
 
 #[embassy_executor::task]
-async fn receive(mut rx: uart_dma::Receiver) {
+async fn receive(
+    uart: UART1<'static>,
+    pin: GPIO0<'static>,
+    uhci: UHCI0<'static>,
+    channel: DMA_CH0<'static>,
+) {
+    // Construct the receiver on its owning executor: no active DMA buffer or
+    // raw ring pointers need to be sent across execution contexts.
+    let mut rx = uart_dma::Receiver::new(uart, pin, uhci, channel);
     // Keep the 4 KiB frame buffer out of the task's stack.
     static DECODER: StaticCell<Decoder> = StaticCell::new();
-    let decoder = DECODER.init(Decoder::new());
+    let decoder = DECODER.init_with(Decoder::new);
     let mut bytes = [0; dma_ring::CHUNK_SIZE];
     let mut uart_logs: [RateLimit; 5] = core::array::from_fn(|_| RateLimit::default());
     let mut dma_logs = RateLimit::default();
     let mut invalid_logs = RateLimit::default();
+    let mut poll_delay_logs = RateLimit::default();
     diagnostics::record(format_args!(
-        "UART DMA active: UHCI0/GDMA0, {} bytes, {} x {} chunks; RX FIFO threshold={}",
+        "UART DMA active: UHCI0/GDMA0, {} bytes, {} x {} chunks; RX FIFO threshold={}; interrupt executor, poll=5 ms",
         dma_ring::CAPACITY,
         dma_ring::CHUNKS,
         dma_ring::CHUNK_SIZE,
         uart_dma::FIFO_THRESHOLD
     ));
+    let mut last_poll_ms = Instant::now().as_millis();
     loop {
-        // Bound work per poll even if the input is continuous. DMA keeps filling
-        // the ring while parsing and while the executor runs network tasks.
+        let now_ms = Instant::now().as_millis();
+        let poll_gap_ms = now_ms.saturating_sub(last_poll_ms);
+        last_poll_ms = now_ms;
+        // Ten missed polling intervals warrant a diagnostic before the 2 KiB
+        // ring fills. Interrupt masking can still delay this executor.
+        if poll_gap_ms >= 50 && poll_delay_logs.admit(now_ms) {
+            diagnostics::record(format_args!("UART DMA poll delayed: {} ms", poll_gap_ms));
+        }
+        // Bound interrupt work even if the input is continuous. This path must
+        // remain allocation-free and must not write to USB or wait for networking.
         for _ in 0..dma_ring::CHUNKS {
             match rx.read_chunk(&mut bytes) {
                 Ok(None) => break,
@@ -163,8 +174,8 @@ async fn receive(mut rx: uart_dma::Receiver) {
                         let (kind, count) = diagnostics::uart_error(error);
                         if uart_logs[kind].admit(Instant::now().as_millis()) {
                             diagnostics::record(format_args!(
-                                "UART {:?}; count={}; partial telegram discarded; DMA restarted",
-                                error, count
+                                "UART {:?}; count={}; poll_gap={} ms; partial telegram discarded; DMA restarted",
+                                error, count, poll_gap_ms
                             ));
                         }
                     }
@@ -175,8 +186,8 @@ async fn receive(mut rx: uart_dma::Receiver) {
                         ));
                         if dma_logs.admit(Instant::now().as_millis()) {
                             diagnostics::record(format_args!(
-                                "DMA {:?}; count={}; buffered data discarded; reception restarted",
-                                error, count
+                                "DMA {:?}; count={}; poll_gap={} ms; buffered data discarded; reception restarted",
+                                error, count, poll_gap_ms
                             ));
                         }
                     }

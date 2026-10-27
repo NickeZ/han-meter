@@ -1,4 +1,5 @@
-/* Reserve main-thread stack headroom for HTTP/MQTT polling and interrupts.
+/* Reserve background main-thread stack headroom for HTTP/TLS and interrupts.
+ * MQTT/networking have a separate 32 KiB RTOS stack.
  * Async task storage consumes the same RAM region. Linking successfully with
  * only the remaining sliver of RAM as stack is not sufficient validation.
  * The HTTP future-size regression test separately limits handler growth.

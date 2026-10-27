@@ -1,9 +1,9 @@
 use crate::diagnostics::log;
+use crate::http_transport::{self, Addresses};
 use alloc::string::String;
-use core::cell::RefCell;
-use embassy_net::Stack;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{Duration, Timer};
+use core::cell::{Cell, RefCell};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::Duration;
 use embedded_storage::nor_flash::ReadNorFlash;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_storage::FlashStorage;
@@ -17,6 +17,15 @@ use static_cell::StaticCell;
 
 pub(crate) type SettingsControl = Control<CriticalSectionRawMutex>;
 type SettingsStore = Store<FlashStorage<'static>>;
+
+// The flash store remains on the background thread throughout its lifetime.
+// Only the hostname and bounded socket bridge arrive from the network thread.
+static HTTP_CONFIG: Signal<CriticalSectionRawMutex, (String, http_transport::Client)> =
+    Signal::new();
+
+pub(crate) fn configure_http(hostname: String, listener: http_transport::Client) {
+    HTTP_CONFIG.signal((hostname, listener));
+}
 
 pub(crate) fn initialize(
     mut flash: FlashStorage<'static>,
@@ -136,7 +145,7 @@ fn storage_offset(flash: &mut FlashStorage<'_>) -> Result<u32, &'static str> {
 struct HttpApplication {
     control: &'static SettingsControl,
     store: RefCell<Option<SettingsStore>>,
-    stack: Stack<'static>,
+    addresses: Cell<Addresses>,
     hostname: String,
 }
 
@@ -175,35 +184,24 @@ impl web::Application for HttpApplication {
     }
 
     fn host_allowed(&self, host: &str) -> bool {
-        let v4 = self.stack.config_v4().map(|c| c.address.address().into());
-        let v6 = self.stack.config_v6().map(|c| c.address.address().into());
-        // The SLAAC stack always installs this address, even without a router.
-        let link_local = embassy_net::Ipv6Cidr::from_link_prefix(
-            &embassy_net::Ipv6Cidr::new(embassy_net::Ipv6Cidr::LINK_LOCAL_PREFIX.address(), 64),
-            self.stack.hardware_address(),
-        )
-        .map(|c| c.address().into());
         web::host_allowed(
             host,
             &self.hostname,
-            [v4, v6, link_local].into_iter().flatten(),
+            self.addresses.get().into_iter().flatten(),
         )
     }
 }
 
 #[embassy_executor::task]
-pub(crate) async fn http(
-    stack: Stack<'static>,
-    control: &'static SettingsControl,
-    store: Option<SettingsStore>,
-    hostname: String,
-) {
-    let app = HttpApplication {
+pub(crate) async fn http(control: &'static SettingsControl, store: Option<SettingsStore>) {
+    let mut app = HttpApplication {
         control,
         store: RefCell::new(store),
-        stack,
-        hostname,
+        addresses: Cell::new([None; 3]),
+        hostname: String::new(),
     };
+    let (hostname, mut listener) = HTTP_CONFIG.wait().await;
+    app.hostname = hostname;
     let router = web::router(&app);
     let config = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: Duration::from_secs(5),
@@ -212,33 +210,32 @@ pub(crate) async fn http(
         write: Duration::from_secs(5),
     })
     .close_connection_after_response();
-    let mut http_buffer = [0; web::HTTP_BUFFER_SIZE];
-    let mut rx = [0; 2048];
-    let mut tx = [0; 2048];
-    picoserve::Server::new(&router, &config, &mut http_buffer)
-        .listen_and_serve(0, stack, 80, &mut rx, &mut tx)
-        .await;
+    loop {
+        let (connection, http_buffer, addresses) = listener.accept().await;
+        app.addresses.set(addresses);
+        let _ = picoserve::Server::new(&router, &config, http_buffer)
+            .serve(connection)
+            .await;
+    }
 }
 
 #[embassy_executor::task]
-pub(crate) async fn address_log(stack: Stack<'static>) {
+pub(crate) async fn address_log() {
     let mut previous = None;
     let mut previous_v6 = None;
     loop {
-        let address = stack.config_v4().map(|config| config.address.address());
+        let [address, address_v6, _] = http_transport::ADDRESSES.wait().await;
         if address != previous {
             if let Some(address) = address {
                 log!("MQTT settings page: http://{}/", address);
             }
             previous = address;
         }
-        let address_v6 = stack.config_v6().map(|config| config.address.address());
         if address_v6 != previous_v6 {
             if let Some(address) = address_v6 {
                 log!("MQTT settings page: http://[{}]/", address);
             }
             previous_v6 = address_v6;
         }
-        Timer::after(Duration::from_secs(1)).await;
     }
 }

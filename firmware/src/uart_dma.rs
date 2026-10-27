@@ -94,6 +94,9 @@ fn uart_config() -> Config {
 }
 
 impl Receiver {
+    // One-time setup must not enlarge the stack frame of every receive poll,
+    // which now runs on whichever RTOS thread the interrupt preempted.
+    #[inline(never)]
     pub fn new(
         uart: UART1<'static>,
         pin: GPIO0<'static>,
@@ -117,7 +120,8 @@ impl Receiver {
         .expect("UHCI EOF configuration");
         let (rx, tx) = uhci.split();
         static STORAGE: StaticCell<Storage> = StaticCell::new();
-        let buffer = Buffer(Ring::new(STORAGE.init(Storage::new())));
+        // Construct in place to keep the 2 KiB ring off the interrupt stack.
+        let buffer = Buffer(Ring::new(STORAGE.init_with(Storage::new)));
         let transfer = rx
             .read(buffer)
             .unwrap_or_else(|(error, _, _)| panic!("DMA start: {error:?}"));
