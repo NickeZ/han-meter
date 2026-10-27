@@ -153,7 +153,11 @@ The TLS dependency is pinned to upstream `main` revision [`6487c62`](https://git
 
 The device synchronizes its clock over SNTP before uploading and refreshes it every six hours. Permit UDP port 123 to `ntp_server`, or set a reachable local NTP hostname or IP address (bracket IPv6 literals). Uploads wait while synchronization fails. SNTP is unauthenticated; use a trusted network/time server. DNS has the same DHCPv4 dependency described above for MQTT.
 
+The local log reports `NTP synchronized` when time is available and `VictoriaLogs first log batch delivered` after the first successful upload. NTP failures distinguish DNS errors/timeouts, unanswered UDP requests, and rejected responses; later TLS/HTTP failures are reported independently. SNTP alternates IPv6 and IPv4 candidates with five-second DNS and three-second per-address timeouts, trying all returned addresses before retrying.
+
 Every retained application diagnostic event is exported, including events recorded only in RAM to avoid blocking UART reception. Each line contains `_msg`, `_time` (Unix milliseconds), `device` (the DHCP hostname), `boot_id`, `firmware`, `sequence`, and `uptime_ms`. VictoriaLogs groups streams by `device`. Timestamps are estimated from the first clock synchronization and monotonic uptime; `boot_id` and `sequence` identify events within a boot.
+
+Startup, Wi-Fi, and periodic status/heap messages are uploaded even when no HAN telegrams arrive. Delivery starts as soon as time synchronization and a verified HTTPS connection succeed.
 
 The uploader checks for new events every five seconds and drains a backlog in batches of up to four. It retains each batch until a successful HTTP response, retrying failures with delays from 1 to 60 seconds and a fresh TLS connection. An acknowledgement lost after ingestion can produce duplicates with the same event identifiers. Network operations have timeouts and upload errors are logged only when entering or recovering from a failure.
 

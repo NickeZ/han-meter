@@ -110,19 +110,54 @@ fn ntp_requires_matching_synchronized_server_response_and_handles_era_rollover()
     let unix = 1_800_000_000u64;
     reply[40..44].copy_from_slice(&((unix + 2_208_988_800) as u32).to_be_bytes());
     reply[44..48].copy_from_slice(&0x8000_0000u32.to_be_bytes());
-    assert_eq!(ntp::unix_ms(&reply, nonce), Some(unix * 1000 + 500));
+    assert_eq!(ntp::unix_ms(&reply, nonce), Ok(unix * 1000 + 500));
     for len in 0..48 {
-        assert_eq!(ntp::unix_ms(&reply[..len], nonce), None);
+        assert_eq!(
+            ntp::unix_ms(&reply[..len], nonce),
+            Err(ntp::ResponseError::ShortPacket)
+        );
     }
-    assert_eq!(ntp::unix_ms(&reply, [0; 8]), None);
-    for (index, byte) in [(0, 0xe4), (0, 0x23), (0, 0x14), (1, 0), (1, 16)] {
+    assert_eq!(
+        ntp::unix_ms(&reply, [0; 8]),
+        Err(ntp::ResponseError::Origin)
+    );
+    for (index, byte, reason) in [
+        (0, 0xe4, ntp::ResponseError::Unsynchronized),
+        (0, 0x23, ntp::ResponseError::Mode),
+        (0, 0x14, ntp::ResponseError::Version),
+        (1, 16, ntp::ResponseError::Stratum),
+    ] {
         let mut bad = reply;
         bad[index] = byte;
-        assert_eq!(ntp::unix_ms(&bad, nonce), None);
+        assert_eq!(ntp::unix_ms(&bad, nonce), Err(reason));
     }
+    let mut denied = reply;
+    denied[1] = 0;
+    denied[12..16].copy_from_slice(b"RATE");
+    assert_eq!(
+        ntp::unix_ms(&denied, nonce),
+        Err(ntp::ResponseError::KissOfDeath(*b"RATE"))
+    );
+    // Even a denial must match the request before interpreting its reason.
+    assert_eq!(
+        ntp::unix_ms(&denied, [0; 8]),
+        Err(ntp::ResponseError::Origin)
+    );
+    let mut zero = reply;
+    zero[40..48].fill(0);
+    assert_eq!(
+        ntp::unix_ms(&zero, nonce),
+        Err(ntp::ResponseError::ZeroTimestamp)
+    );
+    let mut old = reply;
+    old[40..44].copy_from_slice(&3_786_825_599u32.to_be_bytes());
+    assert_eq!(
+        ntp::unix_ms(&old, nonce),
+        Err(ntp::ResponseError::DateBefore2020)
+    );
     let unix_2040 = 2_208_988_800u64;
     reply[40..44].copy_from_slice(&((unix_2040 + 2_208_988_800) as u32).to_be_bytes());
-    assert_eq!(ntp::unix_ms(&reply, nonce), Some(unix_2040 * 1000 + 500));
+    assert_eq!(ntp::unix_ms(&reply, nonce), Ok(unix_2040 * 1000 + 500));
 }
 
 struct Stream {

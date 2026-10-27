@@ -3,9 +3,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use embassy_crypto_rand as _;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embedded_io_adapters::tokio_1::FromTokio;
+use han_config::diagnostics::Log;
 use han_logs::{
-    Endpoint, HEADER_BYTES, http,
+    BATCH_BYTES, Endpoint, HEADER_BYTES, Identity, encode_batch, http,
     tls::{self, TlsClock},
 };
 use std::{
@@ -108,6 +110,26 @@ async fn upload<C: TlsClock>(
     host: &str,
     path: &str,
 ) -> Result<(), tls::Error> {
+    // Boot-only log: no HAN telegram or telemetry update precedes delivery.
+    let log = Log::<NoopRawMutex>::new();
+    log.record(
+        0,
+        format_args!("Boot; debug log is in RAM and resets on restart"),
+    );
+    let identity = Identity {
+        device: "han-test",
+        boot_id: 7,
+        firmware: "test",
+    };
+    let mut body = [0; BATCH_BYTES];
+    let len = encode_batch(
+        &log.page(0),
+        0,
+        &identity,
+        Some(1_800_000_000_000),
+        &mut body,
+    )
+    .unwrap();
     let url = format!("https://{host}:{}/{path}", server.port);
     let endpoint = Endpoint::parse(&url).unwrap();
     let socket = TcpStream::connect(("127.0.0.1", server.port))
@@ -118,7 +140,7 @@ async fn upload<C: TlsClock>(
         FromTokio::new(socket),
         &endpoint,
         "Basic dXNlcjpwYXNz",
-        b"{\"_msg\":\"hello\",\"device\":\"han-test\"}\n",
+        &body[..len],
         &mut scratch,
     );
     assert!(
@@ -376,9 +398,16 @@ async fn verified_https_auth_statuses_cancellation_and_certificate_failures() {
         assert_eq!(request["authorization"], "Basic dXNlcjpwYXNz");
         assert_eq!(request["contentType"], "application/stream+json");
         assert_eq!(request["stream"], "device");
+        let body = request["body"].as_str().unwrap();
+        assert!(body.ends_with('\n'));
+        assert_eq!(body.lines().count(), 1);
+        let startup: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(
-            request["body"],
-            "{\"_msg\":\"hello\",\"device\":\"han-test\"}\n"
+            startup["_msg"],
+            "Boot; debug log is in RAM and resets on restart"
         );
+        assert_eq!(startup["device"], "han-test");
+        assert_eq!(startup["sequence"], 1);
+        assert_eq!(startup["_time"], 1_800_000_000_000u64);
     }
 }
